@@ -63,10 +63,10 @@ Tailscale device ──► 0.0.0.0:3080 (plain HTTP) ─────────
 | Component | Location / Value |
 |---|---|
 | Node.js (required ^22.19 or >=24) | auto-detected from PATH; override with `DSH_NODE` (this machine: scoop `nodejs-lts` 24.19.0) |
-| dsh package (global) | auto-detected from `<npm global root>/@deepseek-ai/dsh` (this machine: v0.1.0-rc.7); override with `DSH_DSH_BIN` |
+| dsh package (global) | auto-detected from `<npm global root>/@deepseek-ai/dsh` (this machine: v0.1.0-rc.8); override with `DSH_DSH_BIN` |
 | Launcher script | `start-harness.ps1` (this machine: `C:\Users\green\dsh\start-harness.ps1`) |
 | Proxy (tailnet front-end) | `web-proxy.js` (`0.0.0.0:$DSH_PROXY_PORT` → `$UPSTREAM_HOST:$DSH_WEB_PORT`) |
-| Logs | next to the launcher: `dsh-web.log`, `dsh-web.err.log`, `proxy.log`, `proxy.err.log` |
+| Logs | next to the launcher: `dsh-web.log`, `dsh-web.err.log`, `proxy.log`, `proxy.err.log`, `update-check.log` |
 | Scheduled task | `DeepSeek Harness` (runs at user logon) |
 | Firewall rule | `DeepSeek Harness (Tailscale only)` (TCP `$DSH_PROXY_PORT` from Tailscale CGNAT ranges) |
 
@@ -82,6 +82,8 @@ Everything is optional — the launcher auto-detects the common values and every
 | `DSH_TS_IP` | this node's 100.x IP from `tailscale status` | Tailscale IP used for `--trusted-host` |
 | `DSH_PROXY_PORT` | `3080` | tailnet-facing proxy port |
 | `DSH_WEB_PORT` | `3081` | loopback dsh web port |
+| `DSH_UPDATE_TRACK` | `next` | npm dist-tag checked for updates (`next` = newest; `latest` = stable) |
+| `DSH_AUTO_UPDATE` | unset (`0`) | set `1` to auto-install newer dsh on startup (backs up `~/.dsh` first) |
 
 The launcher derives the full trusted-host list from `DSH_TS_HOST`/`DSH_TS_IP` × `DSH_PROXY_PORT` (both the `host:port` and bare `host` spellings), starts the proxy with `PROXY_PORT`/`UPSTREAM_PORT` set, and passes `--trusted-host` for each. Set variables persistently with `setx` or in the scheduled task action if you customize them.
 
@@ -140,6 +142,7 @@ Note: this is a logon task, not a boot task — the harness starts when you sign
 
 ## Change log
 
+- **2026-08-19 — Startup update checks**: added `check-updates.ps1` (run by `start-harness.ps1` at logon) to compare the installed dsh version against the npm registry and log/notify — or auto-update via `DSH_AUTO_UPDATE=1` with an automatic `~/.dsh` backup. See [Configuration](#configuration).
 - **2026-08-19 — WebSocket proxy fix (persistence looked broken on refresh)**: rewrote the `upgrade` handler in `web-proxy.js` to proxy WebSockets with `http.request` instead of a raw `net.connect` tunnel. This preserves `Origin`/`Cookie`/`Sec-WebSocket-*` headers (no more empty optional headers → no more `400 Invalid Sec-WebSocket-Protocol header`), applies the same `Host`→origin normalization as the HTTP path, and relays the upstream `101`/error response faithfully. Without it, the client's `/api/events.mux` and `/api/events.host` WebSockets failed and the UI never loaded workspaces or history. See the troubleshooting entry above.
 
 ## Notes

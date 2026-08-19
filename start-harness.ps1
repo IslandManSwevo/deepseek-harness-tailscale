@@ -16,6 +16,10 @@
 #   DSH_TS_IP      - Tailscale 100.x IP (default: from `tailscale status`)
 #   DSH_PROXY_PORT - tailnet-facing proxy port (default 3080)
 #   DSH_WEB_PORT   - loopback dsh web port (default 3081)
+#   DSH_UPDATE_TRACK - npm dist-tag for update checks: "next" (default) or
+#                      "latest" (see check-updates.ps1)
+#   DSH_AUTO_UPDATE  - "1" to auto-install newer dsh versions on startup
+#                      (default: check-and-notify only)
 $ErrorActionPreference = 'Stop'
 
 $dir       = $PSScriptRoot
@@ -100,6 +104,10 @@ if (-not (Test-PortOpen $proxyPort)) {
 
 # Skip the dsh start if something is already listening on the web port.
 if (Test-PortOpen $webPort) { exit 0 }
+
+# Check for a newer dsh release (logs; optionally toasts or auto-updates).
+# Placed here so it runs once per logon and never when dsh is already up.
+& (Join-Path $dir 'check-updates.ps1')
 
 # Signal a remote operator so dsh mounts the web-safe 'browse' directory
 # picker (host.listDirectory / host.createDirectory) instead of the native OS

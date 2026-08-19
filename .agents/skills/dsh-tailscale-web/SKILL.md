@@ -59,8 +59,10 @@ All optional; defaults are auto-detected, so a fresh clone runs as-is on a machi
 | `DSH_TS_IP` | this node's 100.x IP from `tailscale status` | Tailscale IP for `--trusted-host` |
 | `DSH_PROXY_PORT` | `3080` | tailnet-facing proxy port |
 | `DSH_WEB_PORT` | `3081` | loopback dsh web port |
+| `DSH_UPDATE_TRACK` | `next` | npm dist-tag checked for updates (`next` = newest; `latest` = stable) |
+| `DSH_AUTO_UPDATE` | unset (`0`) | set `1` to auto-install newer dsh on startup (backs up `~/.dsh` first) |
 
-The proxy itself reads `PROXY_PORT`, `UPSTREAM_PORT`, and `UPSTREAM_HOST` (default `127.0.0.1`) from its environment, so ports and the upstream target are configurable without editing files.
+The proxy itself reads `PROXY_PORT`, `UPSTREAM_PORT`, and `UPSTREAM_HOST` (default `127.0.0.1`) from its environment, so ports and the upstream target are configurable without editing files. The launcher also runs `check-updates.ps1` at logon to compare the installed dsh version against the `DSH_UPDATE_TRACK` dist-tag and log the result to `update-check.log` (notifying via toast when `BurntToast` is installed, or auto-updating when `DSH_AUTO_UPDATE=1`).
 
 ## Critical: WebSocket proxying (workspaces/history missing after refresh)
 
