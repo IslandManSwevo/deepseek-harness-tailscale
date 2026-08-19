@@ -11,7 +11,6 @@
 'use strict';
 
 const http = require('http');
-const net = require('net');
 
 const LISTEN_HOST = '0.0.0.0';
 const LISTEN_PORT = parseInt(process.env.PROXY_PORT || '3080', 10);
@@ -95,26 +94,62 @@ const server = http.createServer((req, res) => {
   req.pipe(upstreamReq);
 });
 
-// WebSocket/upgrade tunneling (dsh may use SSE instead, but handle both).
+// WebSocket upgrade tunneling. Forward the handshake with http.request so Node
+// relays the upstream 101 (or error) response faithfully, preserving Origin,
+// Cookie, and the client's Sec-WebSocket-* headers (never emitting empty
+// optional headers). Mirror the HTTP handler's Host->Origin normalization so
+// dsh's origin-vs-host trust fence passes behind Tailscale Serve.
+function rawHeaderLines(rawHeaders) {
+  let out = '';
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    out += rawHeaders[i] + ': ' + rawHeaders[i + 1] + '\r\n';
+  }
+  return out;
+}
+
 server.on('upgrade', (req, clientSocket, head) => {
-  const upstreamSocket = net.connect(UPSTREAM_PORT, UPSTREAM_HOST, () => {
-    upstreamSocket.write(
-      req.method + ' ' + req.url + ' HTTP/1.1\r\n' +
-      'Host: ' + (req.headers.host || (UPSTREAM_HOST + ':' + UPSTREAM_PORT)) + '\r\n' +
-      'Upgrade: websocket\r\n' +
-      'Connection: Upgrade\r\n' +
-      'Sec-WebSocket-Key: ' + (req.headers['sec-websocket-key'] || '') + '\r\n' +
-      'Sec-WebSocket-Version: ' + (req.headers['sec-websocket-version'] || '13') + '\r\n' +
-      'Sec-WebSocket-Extensions: ' + (req.headers['sec-websocket-extensions'] || '') + '\r\n' +
-      'Sec-WebSocket-Protocol: ' + (req.headers['sec-websocket-protocol'] || '') + '\r\n' +
-      '\r\n'
+  const headers = Object.assign({}, req.headers);
+  delete headers['proxy-connection'];
+
+  // Normalize Host to the browser Origin's authority (same trust fence as HTTP).
+  const origin = headers['origin'];
+  if (typeof origin === 'string' && origin !== '') {
+    try { headers['host'] = new URL(origin).host; } catch {}
+  }
+
+  const upstreamReq = http.request({
+    host: UPSTREAM_HOST,
+    port: UPSTREAM_PORT,
+    method: req.method,
+    path: req.url,
+    headers,
+  });
+
+  upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+    clientSocket.write(
+      'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
+        ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
+        rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
     );
-    if (head && head.length) upstreamSocket.write(head);
+    if (upstreamHead && upstreamHead.length) clientSocket.write(upstreamHead);
     upstreamSocket.pipe(clientSocket);
     clientSocket.pipe(upstreamSocket);
   });
-  upstreamSocket.on('error', () => clientSocket.destroy());
-  clientSocket.on('error', () => upstreamSocket.destroy());
+
+  upstreamReq.on('response', (upstreamRes) => {
+    clientSocket.write(
+      'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
+        ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
+        rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
+    );
+    upstreamRes.pipe(clientSocket);
+  });
+
+  upstreamReq.on('error', () => clientSocket.destroy());
+  clientSocket.on('error', () => upstreamReq.destroy());
+
+  if (head && head.length) upstreamReq.write(head);
+  upstreamReq.end();
 });
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {

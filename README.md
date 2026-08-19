@@ -54,6 +54,7 @@ Tailscale device ──► 0.0.0.0:3080 (plain HTTP) ─────────
 
 - `dsh web` intentionally refuses to bind beyond `127.0.0.1` (it would expose remote code execution to the network), so `web-proxy.js` (a Node reverse proxy) owns the tailnet-facing port `3080` and forwards everything to `127.0.0.1:3081`.
 - The proxy injects a `crypto.randomUUID` polyfill into HTML responses (needed only over plain HTTP) and normalizes the `Host` header to the browser origin so dsh's origin-vs-host trust fence passes behind Tailscale Serve.
+- WebSocket upgrades (`/api/events.mux`, `/api/events.host`) are forwarded with `http.request` so the upstream `101` is relayed faithfully: original headers (including `Origin` and `Cookie`) are preserved, optional `Sec-WebSocket-*` headers are only sent when present, and `Host` is normalized to the browser origin — same as the HTTP path.
 - Tailscale Serve terminates HTTPS on the tailnet with a Let's Encrypt certificate and forwards `https://shervin-pc.tail41da1a.ts.net` to `http://127.0.0.1:3080`.
 - The Windows Firewall rule allows inbound TCP `3080` only from the Tailscale CGNAT ranges (`100.64.0.0/10` and `fd7a:115c:a1e0::/48`); Tailscale manages its own `:443` listener. Public internet traffic is blocked.
 
@@ -124,6 +125,15 @@ Note: this is a logon task, not a boot task — the harness starts when you sign
 - **dsh won't start**: check `C:\Users\green\dsh\dsh-web.err.log`; the most common cause is a Node version below `^22.19 || >=24` — use the scoop Node 24.19.0.
 - **MagicDNS name won't resolve on the PC**: expected — NextDNS is the local resolver. Use the IP `100.85.211.6` instead.
 - **Creating a workspace from the phone shows `transport failure for /api/host.pickDirectory: HTTP 403`**: the native OS folder dialog is loopback-only by design in dsh. The harness is launched with `SSH_CONNECTION=remote` so it mounts the web-safe in-browser directory picker (`host.listDirectory` / `host.createDirectory`) instead. If this regresses, confirm `start-harness.ps1` still sets `$env:SSH_CONNECTION` and includes the bare `shervin-pc.tail41da1a.ts.net` trusted-host.
+- **Workspaces/history missing after a page refresh (UI stuck on "Add workspace / Choose workspace")**: the proxy's WebSocket upgrade forwarding is broken. dsh only loads the workspace/session baseline after two WebSocket connections open (`/api/events.mux` and `/api/events.host`), opened by the client with `new WebSocket(url)` (no subprotocol). The old `net.connect`-based tunnel always emitted empty `Sec-WebSocket-Protocol:`/`Sec-WebSocket-Extensions:` headers (dsh rejects with `400 Invalid Sec-WebSocket-Protocol header`) and dropped `Origin`/`Host` normalization. Verify the fix with a raw handshake — both paths must return `101`:
+  ```js
+  node -e "const http=require('http');function t(path){const r=http.request({host:'127.0.0.1',port:3080,path,headers:{'Connection':'Upgrade','Upgrade':'websocket','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'dGhlIHNhbXBsZSBub25jZQ==','Origin':'http://127.0.0.1:3080'}});r.on('upgrade',(res,sock)=>{console.log(path,'->',res.statusCode);sock.destroy();});r.on('response',res=>{console.log(path,'->',res.statusCode);res.resume();});r.on('error',e=>console.log(path,'ERR',e.message));r.end();}t('/api/events.mux');setTimeout(()=>t('/api/events.host'),600);"
+  ```
+  Note: persistence itself is built into dsh — workspaces/sessions live on disk under `~/.dsh\` and survive restarts; the UI only appeared empty because the client never connected.
+
+## Change log
+
+- **2026-08-19 — WebSocket proxy fix (persistence looked broken on refresh)**: rewrote the `upgrade` handler in `web-proxy.js` to proxy WebSockets with `http.request` instead of a raw `net.connect` tunnel. This preserves `Origin`/`Cookie`/`Sec-WebSocket-*` headers (no more empty optional headers → no more `400 Invalid Sec-WebSocket-Protocol header`), applies the same `Host`→origin normalization as the HTTP path, and relays the upstream `101`/error response faithfully. Without it, the client's `/api/events.mux` and `/api/events.host` WebSockets failed and the UI never loaded workspaces or history. See the troubleshooting entry above.
 
 ## Notes
 
