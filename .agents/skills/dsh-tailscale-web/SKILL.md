@@ -33,19 +33,34 @@ Tailscale device ──► 0.0.0.0:3080 (plain HTTP) ─────────
 2. HTTPS certs: enable in Tailscale admin console (DNS → HTTPS Certificates); verify with `tailscale cert <node>.<tailnet>.ts.net`.
 3. Node.js >= 24 (`scoop install nodejs-lts`).
 4. `npm install -g @deepseek-ai/dsh`.
-5. Copy `web-proxy.js`, `start-harness.ps1` to `%USERPROFILE%\dsh\`; update the hardcoded node/bin paths, Tailscale IP/hostname, and trusted-host lines.
-6. Firewall rule:
+5. Copy `web-proxy.js` and `start-harness.ps1` into any folder (e.g. `%USERPROFILE%\dsh\`). No edits needed — the launcher auto-detects Node.js (PATH), the dsh install (`npm root -g`), and the Tailscale identity (`tailscale status`), then derives the trusted-host list. Override anything with env vars (see Configuration).
+6. Firewall rule (adjust `-LocalPort` if you set `DSH_PROXY_PORT`):
    ```powershell
    New-NetFirewallRule -DisplayName 'DeepSeek Harness (Tailscale only)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3080 -RemoteAddress 100.64.0.0/10, fd7a:115c:a1e0::/48
    ```
-7. `tailscale serve --bg http://127.0.0.1:3080`
+7. `tailscale serve --bg http://127.0.0.1:3080` (adjust the port if you set `DSH_PROXY_PORT`)
 8. Scheduled task at logon running `start-harness.ps1` (hidden, unlimited runtime).
 9. Run `start-harness.ps1` once (idempotent) and verify.
 
-Launcher essentials:
-- Set `$env:SSH_CONNECTION = 'remote'` before starting dsh so it mounts the web-safe in-browser directory picker (`host.listDirectory`/`host.createDirectory`) instead of the native OS dialog (loopback-only, 403s from remote devices).
-- Pass `--trusted-host` for the tailnet hostname and IP, both bare and with `:3080`.
-- Start proxy only if 3080 is free; start dsh only if 3081 is free (idempotent).
+Launcher essentials (already handled by the script):
+- Sets `$env:SSH_CONNECTION = 'remote'` before starting dsh so it mounts the web-safe in-browser directory picker (`host.listDirectory`/`host.createDirectory`) instead of the native OS dialog (loopback-only, 403s from remote devices).
+- Passes `--trusted-host` for the tailnet hostname and IP, both bare and with `:<proxy port>`.
+- Starts the proxy only if the proxy port is free; starts dsh only if the web port is free (idempotent).
+
+### Configuration (environment variables)
+
+All optional; defaults are auto-detected, so a fresh clone runs as-is on a machine with Node, dsh, and Tailscale installed:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DSH_NODE` | `node` on PATH | Node.js executable path |
+| `DSH_DSH_BIN` | `<npm global root>/@deepseek-ai/dsh/lib/bin.js` | dsh CLI entry |
+| `DSH_TS_HOST` | this node's name from `tailscale status` | Tailscale MagicDNS name |
+| `DSH_TS_IP` | this node's 100.x IP from `tailscale status` | Tailscale IP for `--trusted-host` |
+| `DSH_PROXY_PORT` | `3080` | tailnet-facing proxy port |
+| `DSH_WEB_PORT` | `3081` | loopback dsh web port |
+
+The proxy itself reads `PROXY_PORT`, `UPSTREAM_PORT`, and `UPSTREAM_HOST` (default `127.0.0.1`) from its environment, so ports and the upstream target are configurable without editing files.
 
 ## Critical: WebSocket proxying (workspaces/history missing after refresh)
 

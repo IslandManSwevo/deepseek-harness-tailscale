@@ -14,7 +14,7 @@ const http = require('http');
 
 const LISTEN_HOST = '0.0.0.0';
 const LISTEN_PORT = parseInt(process.env.PROXY_PORT || '3080', 10);
-const UPSTREAM_HOST = '127.0.0.1';
+const UPSTREAM_HOST = process.env.UPSTREAM_HOST || '127.0.0.1';
 const UPSTREAM_PORT = parseInt(process.env.UPSTREAM_PORT || '3081', 10);
 
 const POLYFILL = `<script>
