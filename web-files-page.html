@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Files</title>
+<style>
+:root { --bg:#101418; --panel:#171c22; --border:#262e38; --text:#d6dee8; --muted:#8b98a7; --accent:#4f8cff; --danger:#ff8080; --ok:#7ee07e; }
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--text); }
+header { display:flex; align-items:center; gap:8px; padding:10px 12px; background:var(--panel); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:5; flex-wrap:wrap; }
+header h1 { font-size:16px; margin:0; font-weight:600; }
+#crumb { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--muted); direction:rtl; text-align:left; }
+button { background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:13px; cursor:pointer; }
+button:hover { filter:brightness(1.12); }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+#main { padding:6px 8px; }
+.row { display:flex; align-items:center; gap:10px; padding:9px 10px; border-bottom:1px solid var(--border); cursor:pointer; border-radius:4px; }
+.row:hover { background:var(--panel); }
+.row .name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.row.dir .name { color:#aac8ff; }
+.row.dir .name::after { content:"/"; color:var(--muted); margin-left:2px; }
+.row .meta { color:var(--muted); font-size:12px; white-space:nowrap; }
+#status { padding:10px 12px; font-size:13px; color:var(--muted); min-height:18px; }
+#status.error { color:var(--danger); }
+#status.ok { color:var(--ok); }
+#editorWrap { display:flex; flex-direction:column; height:calc(100% - 58px); padding:8px; }
+#toolbar { display:flex; gap:8px; padding:0 0 8px; align-items:center; flex-wrap:wrap; }
+#saveState { font-size:12px; color:var(--muted); }
+#saveState.ok { color:var(--ok); }
+#saveState.error { color:var(--danger); }
+#editor { flex:1; width:100%; background:var(--panel); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:10px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13px; line-height:1.5; resize:none; white-space:pre; overflow:auto; }
+#notice { padding:16px; text-align:center; color:var(--muted); }
+#notice .path { color:var(--text); word-break:break-all; margin-bottom:12px; font-size:13px; }
+.hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Files</h1>
+  <span id="crumb"></span>
+  <button id="backBtn" class="hidden">Back</button>
+</header>
+<div id="status"></div>
+<div id="main"></div>
+<div id="notice" class="hidden"></div>
+<div id="editorWrap" class="hidden">
+  <div id="toolbar">
+    <button id="saveBtn" class="primary">Save</button>
+    <button id="cancelBtn">Cancel</button>
+    <button id="downloadBtn">Download</button>
+    <span id="saveState"></span>
+  </div>
+  <textarea id="editor" spellcheck="false"></textarea>
+</div>
+<script>
+(function () {
+  var main = document.getElementById('main');
+  var statusEl = document.getElementById('status');
+  var crumb = document.getElementById('crumb');
+  var backBtn = document.getElementById('backBtn');
+  var notice = document.getElementById('notice');
+  var editorWrap = document.getElementById('editorWrap');
+  var editor = document.getElementById('editor');
+  var saveBtn = document.getElementById('saveBtn');
+  var cancelBtn = document.getElementById('cancelBtn');
+  var downloadBtn = document.getElementById('downloadBtn');
+  var saveState = document.getElementById('saveState');
+
+  var currentFile = null;   // absolute path of the file in the editor
+  var originalContent = null;
+
+  function enc(p) { return encodeURIComponent(p); }
+  function setStatus(msg, cls) { statusEl.textContent = msg || ''; statusEl.className = cls || ''; }
+  function setCrumb(t) { crumb.textContent = t || ''; }
+  function setSaveState(msg, cls) { saveState.textContent = msg || ''; saveState.className = cls || ''; }
+
+  function show(which) {
+    main.classList.toggle('hidden', which !== 'main');
+    notice.classList.toggle('hidden', which !== 'notice');
+    editorWrap.classList.toggle('hidden', which !== 'editor');
+  }
+
+  function getJson(url) {
+    return fetch(url).then(function (r) {
+      return r.json().then(function (j) {
+        if (!r.ok || !j.ok) {
+          var e = new Error(j.error || ('HTTP ' + r.status));
+          e.code = j.error;
+          throw e;
+        }
+        return j;
+      });
+    });
+  }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+  function fmtTime(t) {
+    if (!t) return '';
+    var d = new Date(t);
+    return d.toLocaleString();
+  }
+
+  function renderRows(rows) {
+    main.textContent = '';
+    rows.forEach(function (row) {
+      var el = document.createElement('div');
+      el.className = 'row' + (row.isDirectory ? ' dir' : '');
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = row.name;
+      var meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = row.isDirectory ? '' : fmtSize(row.size) + (row.mtime ? ' · ' + fmtTime(row.mtime) : '');
+      el.appendChild(name);
+      el.appendChild(meta);
+      el.addEventListener('click', function () {
+        if (row.isDirectory) { location.hash = '#/dir?path=' + enc(row.path); }
+        else { location.hash = '#/view?path=' + enc(row.path); }
+      });
+      main.appendChild(el);
+    });
+  }
+
+  function loadRoots() {
+    setCrumb('Home');
+    setStatus('');
+    backBtn.classList.add('hidden');
+    show('main');
+    getJson('/__files/api/roots').then(function (j) {
+      renderRows(j.roots.map(function (r) {
+        return { name: r.name, path: r.path, isDirectory: true, size: 0, mtime: null };
+      }));
+    }).catch(function (e) { setStatus(e.message, 'error'); });
+  }
+
+  function loadDir(p) {
+    setStatus('Loading…');
+    show('main');
+    getJson('/__files/api/list?path=' + enc(p)).then(function (j) {
+      setCrumb(j.path);
+      setStatus('');
+      backBtn.classList.remove('hidden');
+      var rows = [];
+      if (j.parent) {
+        rows.push({ name: '.. (parent)', path: j.parent, isDirectory: true, size: 0, mtime: null });
+      }
+      rows = rows.concat(j.entries.map(function (e) {
+        return { name: e.name, path: e.path, isDirectory: e.isDirectory, size: e.size, mtime: e.mtime };
+      }));
+      renderRows(rows);
+    }).catch(function (e) { setStatus(e.message, 'error'); });
+  }
+
+  function openFile(p) {
+    currentFile = p;
+    originalContent = null;
+    setStatus('Loading…');
+    getJson('/__files/api/read?path=' + enc(p)).then(function (j) {
+      if (j.binary || j.tooLarge) {
+        setCrumb(p);
+        setStatus('');
+        backBtn.classList.remove('hidden');
+        show('notice');
+        notice.textContent = '';
+        var pathEl = document.createElement('div');
+        pathEl.className = 'path';
+        pathEl.textContent = p;
+        var msg = document.createElement('div');
+        msg.textContent = j.binary ? 'Binary file — use Download.' : 'File is larger than 2 MB — use Download.';
+        var dl = document.createElement('button');
+        dl.textContent = 'Download';
+        dl.className = 'primary';
+        dl.style.marginTop = '12px';
+        dl.addEventListener('click', function () { location.href = '/__files/api/download?path=' + enc(p); });
+        notice.appendChild(pathEl);
+        notice.appendChild(msg);
+        notice.appendChild(dl);
+        return;
+      }
+      setCrumb(p);
+      setStatus('');
+      backBtn.classList.remove('hidden');
+      show('editor');
+      editor.value = j.content;
+      originalContent = j.content;
+      setSaveState('Read-only view — edit and Save to write', '');
+    }).catch(function (e) {
+      if (e.code === 'is-directory') {
+        location.hash = '#/dir?path=' + enc(p);
+        return;
+      }
+      setStatus(e.message, 'error');
+    });
+  }
+
+  function saveFile() {
+    setSaveState('Saving…', '');
+    fetch('/__files/api/write', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: currentFile, content: editor.value })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (!j.ok) throw new Error(j.error || 'save failed');
+      originalContent = editor.value;
+      setSaveState('Saved ' + fmtSize(j.size), 'ok');
+    }).catch(function (e) { setSaveState(e.message, 'error'); });
+  }
+
+  backBtn.addEventListener('click', function () { history.back(); });
+  saveBtn.addEventListener('click', saveFile);
+  cancelBtn.addEventListener('click', function () {
+    editor.value = originalContent;
+    setSaveState('');
+  });
+  downloadBtn.addEventListener('click', function () {
+    if (currentFile) location.href = '/__files/api/download?path=' + enc(currentFile);
+  });
+
+  function parseHash() {
+    var h = location.hash || '#/';
+    var q = h.indexOf('?');
+    var route = q === -1 ? h : h.slice(0, q);
+    var params = new URLSearchParams(q === -1 ? '' : h.slice(q + 1));
+    return { route: route, params: params };
+  }
+
+  function render() {
+    var h = parseHash();
+    if (h.route === '#/dir') loadDir(h.params.get('path'));
+    else if (h.route === '#/view') openFile(h.params.get('path'));
+    else loadRoots();
+  }
+
+  window.addEventListener('hashchange', render);
+  render();
+})();
+</script>
+</body>
+</html>

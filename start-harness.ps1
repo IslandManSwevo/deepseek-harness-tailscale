@@ -20,6 +20,8 @@
 #                      "latest" (see check-updates.ps1)
 #   DSH_AUTO_UPDATE  - "1" to auto-install newer dsh versions on startup
 #                      (default: check-and-notify only)
+#   DSH_FILES_ROOT   - semicolon-separated roots the /__files web viewer may
+#                      read/write (default: the host account home directory)
 $ErrorActionPreference = 'Stop'
 
 $dir       = $PSScriptRoot
@@ -93,10 +95,14 @@ if (-not $tsHost) { throw 'Tailscale hostname unknown; set DSH_TS_HOST' }
 if (-not $tsIp)   { throw 'Tailscale IP unknown; set DSH_TS_IP' }
 
 # Start the proxy only if nothing is listening on the proxy port (idempotent).
-# web-proxy.js reads PROXY_PORT/UPSTREAM_PORT from the environment.
+# web-proxy.js reads PROXY_PORT/UPSTREAM_PORT from the environment; the
+# /__files viewer reads DSH_TS_HOST/DSH_TS_IP to build its trusted-authority
+# list and DSH_FILES_ROOT for its allowed roots.
 if (-not (Test-PortOpen $proxyPort)) {
     $env:PROXY_PORT    = "$proxyPort"
     $env:UPSTREAM_PORT = "$webPort"
+    if ($tsHost) { $env:DSH_TS_HOST = $tsHost }
+    if ($tsIp)   { $env:DSH_TS_IP   = $tsIp }
     Start-Process -FilePath $node -ArgumentList (Join-Path $dir 'web-proxy.js') `
         -WindowStyle Hidden -WorkingDirectory $dir `
         -RedirectStandardOutput $plog -RedirectStandardError $perr

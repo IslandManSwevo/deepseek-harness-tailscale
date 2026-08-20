@@ -24,6 +24,7 @@ Tailscale device ──► 0.0.0.0:3080 (plain HTTP) ─────────
 - dsh web binds `127.0.0.1:3081` only.
 - The Node proxy binds `0.0.0.0:3080` and forwards to `127.0.0.1:3081`.
 - The proxy injects a `crypto.randomUUID` polyfill into HTML (only available in secure contexts; needed over plain HTTP) and normalizes the `Host` header to the browser Origin so dsh's origin-vs-host trust fence passes behind Tailscale Serve.
+- The proxy also serves a local web file browser/viewer/editor under `/__files` (`web-files.js` + `web-files-page.html`) and intercepts remote `host.openPath` calls so produced-file chips open the viewer instead of 403ing.
 - Tailscale Serve terminates HTTPS with a Let's Encrypt cert and forwards to `http://127.0.0.1:3080`.
 - A Windows Firewall rule restricts inbound `3080` to the Tailscale CGNAT ranges (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`).
 
@@ -61,8 +62,9 @@ All optional; defaults are auto-detected, so a fresh clone runs as-is on a machi
 | `DSH_WEB_PORT` | `3081` | loopback dsh web port |
 | `DSH_UPDATE_TRACK` | `next` | npm dist-tag checked for updates (`next` = newest; `latest` = stable) |
 | `DSH_AUTO_UPDATE` | unset (`0`) | set `1` to auto-install newer dsh on startup (backs up `~/.dsh` first) |
+| `DSH_FILES_ROOT` | host account home directory | semicolon-separated roots the `/__files` viewer may read/write |
 
-The proxy itself reads `PROXY_PORT`, `UPSTREAM_PORT`, and `UPSTREAM_HOST` (default `127.0.0.1`) from its environment, so ports and the upstream target are configurable without editing files. The launcher also runs `check-updates.ps1` at logon to compare the installed dsh version against the `DSH_UPDATE_TRACK` dist-tag and log the result to `update-check.log` (notifying via toast when `BurntToast` is installed, or auto-updating when `DSH_AUTO_UPDATE=1`).
+The proxy itself reads `PROXY_PORT`, `UPSTREAM_PORT`, and `UPSTREAM_HOST` (default `127.0.0.1`) from its environment, so ports and the upstream target are configurable without editing files. The launcher exports `DSH_TS_HOST`/`DSH_TS_IP` to the proxy so `/__files` derives its trusted authorities, and runs `check-updates.ps1` at logon to compare the installed dsh version against the `DSH_UPDATE_TRACK` dist-tag and log the result to `update-check.log` (notifying via toast when `BurntToast` is installed, or auto-updating when `DSH_AUTO_UPDATE=1`).
 
 ## Critical: WebSocket proxying (workspaces/history missing after refresh)
 
@@ -136,10 +138,19 @@ Expect `101` for both. A `400 Invalid Sec-WebSocket-Protocol header` means the p
 Persistence is built in (not something to build): workspaces and sessions live under `~/.dsh\`. On refresh, the client restores the current session from `localStorage['dsh.sessions.current']`; if none is set (or the browser blocks storage, e.g. iOS private mode), it auto-connects the most recent workspace and creates/opens its blank session — history still exists server-side. If the UI appears empty after refresh, check the WebSockets first, then confirm `workspace.list` / `session.list` RPCs return data:
 - `POST /api/<method>` with `{"type":"client-request","rpcId":"...","method":"...","payload":{}}`.
 
+## Web file viewer (`/__files`)
+
+`host.openPath` is loopback-only in dsh (`PRIVILEGED_METHODS` with an empty trust list in `dsh-client-connection`), so from the phone clicking a produced-file chip 403s. The proxy fixes this:
+- Injected into dsh's HTML: a script that (a) on non-loopback hosts overrides `window.fetch` for `POST /api/host.openPath`, opens `/__files/#/view?path=<abs>` in a new tab (falls back to `location.assign`), and returns a synthetic `{type:"server-response", rpcId, result:{ok:true,value:{opened:true}}}` so the client's zod schema passes; and (b) adds a floating **Files** button. On `127.0.0.1` the native `Invoke-Item` behavior is kept.
+- `web-files.js` endpoints: `GET /__files/` (page), `/api/roots`, `/api/list?path=`, `/api/read?path=`, `/api/download?path=`, `POST /api/write`. Text files up to 2 MB are editable (save restores CRLF); binary/larger files offer Download.
+- Security: same loopback/trusted-host fence as dsh (rejects cross-site and Origin mismatches) and path containment to `DSH_FILES_ROOT` (default `~`) with `..`/symlink/null-byte rejection. Read/write only.
+- If `host.openPath` still 403s from the phone: the page was probably loaded from a host the interceptor considers loopback, or the proxy predates this feature — restart the proxy (`start-harness.ps1` is idempotent; or kill the PID on 3080 and rerun).
+
 ## Troubleshooting
 
 - Empty UI / "Add workspace" after refresh → WebSocket proxy bug (see above). Check browser console for `WebSocket connection to 'ws://.../api/events.mux' failed` and `connection lost, retry`.
 - `host.pickDirectory` HTTP 403 from phone → ensure `SSH_CONNECTION=remote` is set in the launcher and the bare trusted-host is present.
+- `host.openPath` HTTP 403 from phone → fixed by the `/__files` viewer; the proxy intercepts remote openPath calls (see Web file viewer above).
 - MagicDNS name won't resolve on the PC itself → expected if the local resolver isn't Tailscale's; use the 100.x IP.
 - Restart proxy only: find PID on 3080 (`Get-NetTCPConnection -LocalPort 3080`), `Stop-Process`, then start `node web-proxy.js` again (dsh on 3081 can stay up).
 
@@ -149,3 +160,4 @@ Persistence is built in (not something to build): workspaces and sessions live u
 2. Page loads with all workspaces listed in the sidebar.
 3. Opening a conversation, then reloading the page, restores the same session with history intact.
 4. Workspace creation from a remote device works via the in-browser picker (no 403).
+5. From a non-loopback origin, clicking a produced file opens `/__files` viewer (no 403); the Files button is present; the viewer can list/read/edit/download within `DSH_FILES_ROOT`.

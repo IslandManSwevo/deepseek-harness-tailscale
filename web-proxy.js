@@ -11,6 +11,7 @@
 'use strict';
 
 const http = require('http');
+const files = require('./web-files.js');
 
 const LISTEN_HOST = '0.0.0.0';
 const LISTEN_PORT = parseInt(process.env.PROXY_PORT || '3080', 10);
@@ -34,6 +35,12 @@ const POLYFILL = `<script>
 </script>`;
 
 const server = http.createServer((req, res) => {
+  // Serve the web file browser/viewer locally (never forwarded to dsh).
+  if (req.url.startsWith('/__files')) {
+    files.handle(req, res);
+    return;
+  }
+
   const headers = Object.assign({}, req.headers);
   // Keep hop-by-hop headers handled by Node out of the forwarded request.
   delete headers['connection'];
@@ -73,6 +80,10 @@ const server = http.createServer((req, res) => {
       if (html.includes('crypto.randomUUID') === false) {
         html = html.replace(/<head([^>]*)>/i, (m, attrs) => '<head' + attrs + '>' + POLYFILL);
       }
+      // The integration script (file-viewer fetch interception + Files button)
+      // is injected separately: it references crypto.randomUUID, which must
+      // not defeat the polyfill guard above.
+      html = html.replace(/<head([^>]*)>/i, (m, attrs) => '<head' + attrs + '>' + files.integrationScript());
       const outHeaders = Object.assign({}, upstreamRes.headers);
       delete outHeaders['content-length'];
       delete outHeaders['connection'];
