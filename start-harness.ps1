@@ -8,12 +8,15 @@
 # browser-trust fence. HTTPS is terminated by Tailscale Serve -> 127.0.0.1:3080.
 #
 # Configuration (all optional; values are auto-detected when unset):
-#   DSH_NODE       - Node.js executable path (default: node on PATH)
+#   DSH_NODE       - Node.js >= 24 executable path (default: scoop nodejs-lts,
+#                    then node on PATH; older nodes are rejected)
 #   DSH_DSH_BIN    - dsh CLI entry, e.g. .../@deepseek-ai/dsh/lib/bin.js
 #                    (default: <npm global root>/@deepseek-ai/dsh/lib/bin.js)
 #   DSH_TS_HOST    - Tailscale MagicDNS name, e.g. myhost.tailXXXX.ts.net
 #                    (default: this node's name from `tailscale status`)
 #   DSH_TS_IP      - Tailscale 100.x IP (default: from `tailscale status`)
+#   DSH_TS_WAIT_SECONDS - seconds to poll Tailscale for its identity at startup
+#                    (default: 60; accounts for Tailscale still starting at logon)
 #   DSH_PROXY_PORT - tailnet-facing proxy port (default 3080)
 #   DSH_WEB_PORT   - loopback dsh web port (default 3081)
 #   DSH_UPDATE_TRACK - npm dist-tag for update checks: "next" (default) or
@@ -43,13 +46,55 @@ function Test-PortOpen([int] $port) {
     }
 }
 
-# Locate Node.js: DSH_NODE wins, otherwise the node on PATH.
-$node = $env:DSH_NODE
-if (-not $node) {
-    $cmd = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $cmd) { throw 'node not found on PATH; install Node.js >= 24 or set DSH_NODE' }
-    $node = $cmd.Source
+# Locate a Node.js >= 24 runtime. dsh rc.8 reaches into Node's internal ESM
+# loader and needs the Node 24 API, but PATH often resolves `node` to an older
+# system Node (e.g. C:\Program Files\nodejs, v22) ahead of scoop's Node 24.
+# Priority: DSH_NODE override, scoop's nodejs-lts "current", then PATH node —
+# but any candidate must report a major version >= 24.
+function Get-NodeMajor([string]$nodePath) {
+    try {
+        $v = & $nodePath --version 2>$null
+        if ($v -match '^v(\d+)') { return [int]$Matches[1] }
+    } catch { }
+    return 0
 }
+
+function Resolve-Node {
+    if ($env:DSH_NODE) {
+        if (-not (Test-Path -LiteralPath $env:DSH_NODE)) { throw "DSH_NODE points to a missing file: $($env:DSH_NODE)" }
+        return $env:DSH_NODE
+    }
+
+    $candidates = @()
+    if ($env:SCOOP)       { $candidates += (Join-Path $env:SCOOP 'apps\nodejs-lts\current\node.exe') }
+    if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'scoop\apps\nodejs-lts\current\node.exe') }
+    if ($env:SCOOP)       { $candidates += (Join-Path $env:SCOOP 'shims\node.exe') }
+    if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'scoop\shims\node.exe') }
+
+    $cmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($cmd) { $candidates += $cmd.Source }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if (-not $candidate -or -not (Test-Path -LiteralPath $candidate)) { continue }
+        if ($seen[$candidate]) { continue }
+        $seen[$candidate] = $true
+        if ((Get-NodeMajor $candidate) -ge 24) { return $candidate }
+    }
+
+    $foundLines = @()
+    foreach ($candidate in $candidates) {
+        if (-not $candidate -or -not (Test-Path -LiteralPath $candidate)) { continue }
+        $foundLines += "$candidate ($(& $candidate --version 2>$null))"
+    }
+    $foundLines = @($foundLines | Select-Object -Unique)
+    if ($foundLines.Count -gt 0) {
+        throw "dsh requires Node.js >= 24. Found only:`n    " + ($foundLines -join "`n    ") + "`nInstall Node 24 (e.g. `"scoop install nodejs-lts`") or set DSH_NODE to a Node 24+ executable."
+    }
+    throw 'node not found; install Node.js >= 24 or set DSH_NODE'
+}
+
+$node = Resolve-Node
 
 # Locate the dsh CLI entry: DSH_DSH_BIN wins, otherwise resolve the dsh shim or
 # a known npm global root (scoop's root and the per-user default prefix differ).
@@ -81,18 +126,28 @@ if (-not $bin) {
     if (-not $bin) { throw 'dsh not found; install with "npm install -g @deepseek-ai/dsh" or set DSH_DSH_BIN' }
 }
 
-# Discover the Tailscale identity: env vars win, otherwise `tailscale status`.
+# Discover the Tailscale identity: env vars win, otherwise poll `tailscale
+# status` until the node reports its MagicDNS name and 100.x IP. At logon the
+# Tailscale service is often still starting, so retry instead of failing
+# immediately. Configurable via DSH_TS_WAIT_SECONDS (default 60).
 $tsHost = $env:DSH_TS_HOST
 $tsIp   = $env:DSH_TS_IP
 if (-not $tsHost -or -not $tsIp) {
-    try {
-        $ts = tailscale status --json 2>$null | ConvertFrom-Json
-        if (-not $tsHost -and $ts.Self.DNSName) { $tsHost = ([string]$ts.Self.DNSName).TrimEnd('.') }
-        if (-not $tsIp -and $ts.Self.TailscaleIPs) { $tsIp = @($ts.Self.TailscaleIPs | Where-Object { $_ -like '100.*' })[0] }
-    } catch { }
+    $waitSeconds = 60
+    if ($env:DSH_TS_WAIT_SECONDS -match '^\d+$') { $waitSeconds = [int]$env:DSH_TS_WAIT_SECONDS }
+    $deadline = (Get-Date).AddSeconds($waitSeconds)
+    do {
+        try {
+            $ts = tailscale status --json 2>$null | ConvertFrom-Json
+            if (-not $tsHost -and $ts.Self.DNSName) { $tsHost = ([string]$ts.Self.DNSName).TrimEnd('.') }
+            if (-not $tsIp -and $ts.Self.TailscaleIPs) { $tsIp = @($ts.Self.TailscaleIPs | Where-Object { $_ -like '100.*' })[0] }
+        } catch { }
+        if ($tsHost -and $tsIp) { break }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
 }
-if (-not $tsHost) { throw 'Tailscale hostname unknown; set DSH_TS_HOST' }
-if (-not $tsIp)   { throw 'Tailscale IP unknown; set DSH_TS_IP' }
+if (-not $tsHost) { throw 'Tailscale hostname unknown after waiting; set DSH_TS_HOST' }
+if (-not $tsIp)   { throw 'Tailscale IP unknown after waiting; set DSH_TS_IP' }
 
 # Start the proxy only if nothing is listening on the proxy port (idempotent).
 # web-proxy.js reads PROXY_PORT/UPSTREAM_PORT from the environment; the
