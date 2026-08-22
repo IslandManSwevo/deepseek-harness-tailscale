@@ -70,6 +70,8 @@ function buildTrustedAuthorities() {
   const hosts = [];
   if (process.env.DSH_TS_HOST) hosts.push(process.env.DSH_TS_HOST);
   if (process.env.DSH_TS_IP) hosts.push(process.env.DSH_TS_IP);
+  // IPv6 ULAs are bracketed so 'host' (with optional port) compares correctly.
+  if (process.env.DSH_TS_IPV6) hosts.push('[' + process.env.DSH_TS_IPV6 + ']');
   const list = [];
   for (const h of hosts) {
     list.push(h);

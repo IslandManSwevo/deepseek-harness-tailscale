@@ -1,3 +1,6 @@
 # Runtime logs (recreated on each start)
 *.log
 *.err.log
+
+# PID files (written by the launcher / watchdog)
+*.pid

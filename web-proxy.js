@@ -13,10 +13,14 @@
 const http = require('http');
 const files = require('./web-files.js');
 
-const LISTEN_HOST = '0.0.0.0';
-const LISTEN_PORT = parseInt(process.env.PROXY_PORT || '3080', 10);
+// Bind the unspecified dual-stack address so both Tailscale address families
+// (100.x CGNAT and fd7a::/48 ULA) can reach the proxy. DSH_PROXY_PORT /
+// DSH_WEB_PORT are accepted as documented fallbacks alongside PROXY_PORT /
+// UPSTREAM_PORT (the launcher sets all four).
+const LISTEN_HOST = '::';
+const LISTEN_PORT = parseInt(process.env.PROXY_PORT || process.env.DSH_PROXY_PORT || '3080', 10);
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST || '127.0.0.1';
-const UPSTREAM_PORT = parseInt(process.env.UPSTREAM_PORT || '3081', 10);
+const UPSTREAM_PORT = parseInt(process.env.UPSTREAM_PORT || process.env.DSH_WEB_PORT || '3081', 10);
 
 const POLYFILL = `<script>
 (function () {
