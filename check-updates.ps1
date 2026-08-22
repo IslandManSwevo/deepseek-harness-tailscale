@@ -59,12 +59,18 @@ function Resolve-InstalledVersion {
 }
 
 function ConvertTo-DshVersion([string]$version) {
-    # Parse X.Y.Z[-rc.N] into comparable numeric fields. A stable release
-    # (no -rc suffix) sorts above any pre-release of the same X.Y.Z.
-    $m = [regex]::Match($version, '^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?')
+    # Parse X.Y.Z[-suffix] into comparable numeric fields. A stable release
+    # (no suffix) sorts above any pre-release of the same X.Y.Z. Only rc.N
+    # prereleases are shipped today, but any other suffix (beta, next, ...)
+    # must still sort below the stable release instead of being mistaken for
+    # one, so non-rc suffixes compare as rc = -1.
+    $m = [regex]::Match($version, '^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$')
     if (-not $m.Success) { return $null }
     $rc = [int]::MaxValue
-    if ($m.Groups[4].Success) { $rc = [int]$m.Groups[4].Value }
+    if ($m.Groups[4].Success) {
+        $rcMatch = [regex]::Match($m.Groups[4].Value, '^rc\.(\d+)$')
+        if ($rcMatch.Success) { $rc = [int]$rcMatch.Groups[1].Value } else { $rc = -1 }
+    }
     return [pscustomobject]@{
         major = [int]$m.Groups[1].Value
         minor = [int]$m.Groups[2].Value

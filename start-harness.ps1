@@ -127,8 +127,16 @@ function Stop-Deployment {
     foreach ($name in @('proxy', 'dsh')) {
         $port = if ($name -eq 'proxy') { $proxyPort } else { $webPort }
         $targets = @()
+        # Only stop the port owner when it is *our* process. A foreign process
+        # squatting on the port is reported, not killed - the launcher checks
+        # ownership everywhere else, so -Stop must too.
         $owner = Get-PortOwnerProcess $port
-        if ($owner -and $owner.ProcessId) { $targets += [int]$owner.ProcessId }
+        $isOurs = if ($name -eq 'proxy') { Test-PortIsProxy $port } else { Test-PortIsDsh $port }
+        if ($owner -and $owner.ProcessId -and $isOurs) {
+            $targets += [int]$owner.ProcessId
+        } elseif ($owner -and $owner.ProcessId) {
+            Write-Warning "port $port is owned by $($owner.Name) (pid $($owner.ProcessId)) - not part of this deployment, leaving it running"
+        }
         $fromFile = Get-PidFile $name
         if ($fromFile) { $targets += $fromFile }
         foreach ($procId in ($targets | Select-Object -Unique)) {

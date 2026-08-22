@@ -81,12 +81,14 @@ const server = http.createServer((req, res) => {
     upstreamRes.on('data', (c) => chunks.push(c));
     upstreamRes.on('end', () => {
       let html = Buffer.concat(chunks).toString('utf8');
-      if (html.includes('crypto.randomUUID') === false) {
-        html = html.replace(/<head([^>]*)>/i, (m, attrs) => '<head' + attrs + '>' + POLYFILL);
-      }
+      // Always inject: the polyfill's own IIFE is idempotent (!crypto.randomUUID),
+      // so injecting over a page that already provides randomUUID is a no-op,
+      // while a page that merely *references* the method (e.g. an inlined
+      // script) still gets a working implementation over plain HTTP. Must run
+      // before dsh's own scripts, hence the injection right after <head>.
+      html = html.replace(/<head([^>]*)>/i, (m, attrs) => '<head' + attrs + '>' + POLYFILL);
       // The integration script (file-viewer fetch interception + Files button)
-      // is injected separately: it references crypto.randomUUID, which must
-      // not defeat the polyfill guard above.
+      // is injected separately, after the polyfill.
       html = html.replace(/<head([^>]*)>/i, (m, attrs) => '<head' + attrs + '>' + files.integrationScript());
       const outHeaders = Object.assign({}, upstreamRes.headers);
       delete outHeaders['content-length'];
@@ -168,6 +170,10 @@ server.on('upgrade', (req, clientSocket, head) => {
 });
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {
-  process.stdout.write('dsh web proxy listening on ' + LISTEN_HOST + ':' + LISTEN_PORT +
+  // Report the actual bound port (server.address()), so LISTEN_PORT=0 (OS
+  // picks a free port) is usable by operators and by the test suite.
+  const addr = server.address();
+  const port = addr && typeof addr === 'object' ? addr.port : LISTEN_PORT;
+  process.stdout.write('dsh web proxy listening on ' + LISTEN_HOST + ':' + port +
     ' -> ' + UPSTREAM_HOST + ':' + UPSTREAM_PORT + '\n');
 });
