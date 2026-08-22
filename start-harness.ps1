@@ -396,9 +396,11 @@ if (Test-PortOpen $webPort) {
 
 # Check for a newer dsh release (logs; optionally toasts or auto-updates).
 # Fired asynchronously so a slow npm registry never delays dsh startup.
-Start-Process powershell -NoProfile -ExecutionPolicy Bypass `
-    -ArgumentList '-File', (Join-Path $dir 'check-updates.ps1') `
-    -WindowStyle Hidden | Out-Null
+# Note: -NoProfile/-ExecutionPolicy are powershell.exe flags, so they must
+# live inside -ArgumentList, not as Start-Process parameters.
+Start-Process powershell -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $dir 'check-updates.ps1')
+) -WindowStyle Hidden | Out-Null
 
 # Signal a remote operator so dsh mounts the web-safe 'browse' directory
 # picker (host.listDirectory / host.createDirectory) instead of the native OS
