@@ -78,54 +78,15 @@ The client opens these with plain `new WebSocket(url)` (no subprotocol) in `dsh-
 
 ### Correct upgrade handler pattern
 
-A naive `net.connect`-based tunnel that always writes `Sec-WebSocket-Protocol:` / `Sec-WebSocket-Extensions:` (even when empty) and drops `Origin`/`Host` normalization breaks the handshake. Use `http.request` so Node relays the upstream `101` faithfully, preserve all original headers, only forward optional `Sec-WebSocket-*` headers when present, and normalize `Host` to the browser Origin authority:
+A naive `net.connect`-based tunnel that always writes `Sec-WebSocket-Protocol:` / `Sec-WebSocket-Extensions:` (even when empty) and drops `Origin`/`Host` normalization breaks the handshake. The exact handler lives in `web-proxy.js` and is asserted by the repo's automated suite (`node --test test/proxy.test.js`) — keep the two in sync. The pattern that must be preserved:
 
-```js
-function rawHeaderLines(rawHeaders) {
-  let out = '';
-  for (let i = 0; i < rawHeaders.length; i += 2) {
-    out += rawHeaders[i] + ': ' + rawHeaders[i + 1] + '\r\n';
-  }
-  return out;
-}
-
-server.on('upgrade', (req, clientSocket, head) => {
-  const headers = Object.assign({}, req.headers);
-  delete headers['proxy-connection'];
-  const origin = headers['origin'];
-  if (typeof origin === 'string' && origin !== '') {
-    try { headers['host'] = new URL(origin).host; } catch {}
-  }
-  const upstreamReq = http.request({
-    host: UPSTREAM_HOST, port: UPSTREAM_PORT,
-    method: req.method, path: req.url, headers,
-  });
-  upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
-    clientSocket.write(
-      'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
-        ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
-        rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
-    );
-    if (upstreamHead && upstreamHead.length) clientSocket.write(upstreamHead);
-    upstreamSocket.pipe(clientSocket);
-    clientSocket.pipe(upstreamSocket);
-  });
-  upstreamReq.on('response', (upstreamRes) => {
-    clientSocket.write(
-      'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
-        ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
-        rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
-    );
-    upstreamRes.pipe(clientSocket);
-  });
-  upstreamReq.on('error', () => clientSocket.destroy());
-  clientSocket.on('error', () => upstreamReq.destroy());
-  if (head && head.length) upstreamReq.write(head);
-  upstreamReq.end();
-});
-```
+- Use `http.request` to the upstream so Node relays the upstream `101` (or error) response faithfully.
+- Preserve all original headers (`Origin`, `Cookie`); only forward optional `Sec-WebSocket-*` headers when present (an empty `Sec-WebSocket-Protocol:` makes dsh reject with `400`).
+- Normalize `Host` to the browser Origin authority, same as the HTTP path.
 
 ### Quick handshake test
+
+The same two handshakes are asserted automatically by `node --test test/proxy.test.js`; for a manual check against a live deployment:
 
 ```js
 node -e "const http=require('http');function t(path){const r=http.request({host:'127.0.0.1',port:3080,path,headers:{'Connection':'Upgrade','Upgrade':'websocket','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'dGhlIHNhbXBsZSBub25jZQ==','Origin':'http://127.0.0.1:3080'}});r.on('upgrade',(res,sock)=>{console.log(path,'->',res.statusCode);sock.destroy();});r.on('response',res=>{console.log(path,'->',res.statusCode);res.resume();});r.on('error',e=>console.log(path,'ERR',e.message));r.end();}t('/api/events.mux');setTimeout(()=>t('/api/events.host'),600);"

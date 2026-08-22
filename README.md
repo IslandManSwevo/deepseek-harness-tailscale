@@ -59,7 +59,7 @@ Refresh → history-lost is **not a data problem — your data was never lost** 
 - Every request passes a **browser-trust fence**: loopback or trusted Tailscale authorities only; cross-site and Origin/Host-mismatched requests are rejected.
 - The `/__files` viewer is **read/write only** (no code execution), path-contained to `DSH_FILES_ROOT`, with `..`, symlink-escape, and null-byte traversal rejected.
 
-> **Heads-up:** anything on your tailnet can reach the harness through the proxy. That's the point — but keep your tailnet to people you trust.
+> **Heads-up:** anything on your tailnet can reach the harness through the proxy. That's the point — but keep your tailnet to people you trust. dsh has no login; on a shared tailnet, restrict who can reach this node's `:3080`/`:443` with **Tailscale ACLs** rather than relying on tailnet membership alone.
 
 ## Configuration
 
@@ -70,6 +70,15 @@ Every setting is optional and auto-detected; override with environment variables
 - **History "missing" after a refresh** → WebSocket proxying; run the raw-handshake test from the [guide](docs/DEPLOY.md#troubleshooting).
 - **`HTTP 403` creating a workspace from your phone** → the launcher sets `SSH_CONNECTION=remote` to enable the in-browser directory picker.
 - **`HTTP 403` opening a produced file from your phone** → use the built-in `/__files` viewer.
+
+## Testing
+
+`node --test test/` runs the proxy and file-viewer suites against an in-process fake upstream — no dsh or Tailscale needed:
+
+- WebSocket `101` relay and upstream-rejection passthrough
+- `Host` → `Origin` normalization
+- polyfill + integration-script injection (including when the document already references `crypto.randomUUID`)
+- `/__files` path containment, trust fence, and CRLF-preserving writes
 
 ## FAQ
 

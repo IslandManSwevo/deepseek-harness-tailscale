@@ -100,11 +100,11 @@ Start (idempotent — exits if already running):
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dsh\start-harness.ps1"
 ```
 
-Stop:
+Stop (ownership-aware — stops only this deployment's processes; a foreign process squatting on the ports is reported and left running):
 ```powershell
-Get-Process node | Where-Object { $_.Path -like '*scoop*nodejs-lts*' } | Stop-Process
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dsh\start-harness.ps1" -Stop
 ```
-(or find the PID listening on 3081 and stop it.)
+(`-Restart` stops then starts again; plain runs are idempotent.)
 
 The launcher starts `web-proxy.js` (if the proxy port is free) and then dsh (if the web port is free). It exports `SSH_CONNECTION=remote` to mount the web-safe directory picker, then runs dsh with `--trusted-host` entries derived from the Tailscale identity and proxy port (both `host:port` and bare `host` spellings).
 
