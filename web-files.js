@@ -232,7 +232,16 @@ function writeText(abs, content) {
   if (previous !== null && previous.includes('\r\n') && !out.includes('\r\n')) {
     out = out.replace(/\n/g, '\r\n');
   }
-  fs.writeFileSync(abs, out, 'utf8');
+  // Atomic write: write to a sibling temp file, then rename over the target,
+  // so a crash mid-save can never leave a truncated file behind.
+  const tmp = abs + '.tmp-' + process.pid + '-' + Date.now();
+  try {
+    fs.writeFileSync(tmp, out, 'utf8');
+    fs.renameSync(tmp, abs);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) { /* best effort */ }
+    throw e;
+  }
   return { path: abs, size: Buffer.byteLength(out, 'utf8') };
 }
 
@@ -425,5 +434,7 @@ module.exports = {
   buildTrustedAuthorities,
   safeResolve,
   isLoopbackHostname,
+  readText,
+  writeText,
   integrationScript,
 };
