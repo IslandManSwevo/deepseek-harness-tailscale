@@ -38,7 +38,22 @@ const POLYFILL = `<script>
 })();
 </script>`;
 
+// Compact access log on stdout (the launcher redirects it to proxy.log):
+// ISO time, remote address, method, path, upstream status, duration. The
+// remote address is what makes remote-device outages diagnosable: if nothing
+// appears while a phone "can't load", the packets never reached the proxy.
+function logLine(line) {
+  process.stdout.write(line + '\n');
+}
+
 const server = http.createServer((req, res) => {
+  const startedAt = Date.now();
+  const remote = String((req.socket && req.socket.remoteAddress) || '-').replace(/^::ffff:/, '');
+  res.on('finish', () => {
+    logLine(new Date().toISOString() + ' ' + remote + ' ' + req.method + ' ' + req.url +
+      ' -> ' + res.statusCode + ' (' + (Date.now() - startedAt) + 'ms)');
+  });
+
   // Serve the web file browser/viewer locally (never forwarded to dsh).
   if (req.url.startsWith('/__files')) {
     files.handle(req, res);
@@ -143,6 +158,9 @@ server.on('upgrade', (req, clientSocket, head) => {
   });
 
   upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+    logLine(new Date().toISOString() + ' ' +
+      String(clientSocket.remoteAddress || '-').replace(/^::ffff:/, '') +
+      ' WS ' + req.url + ' -> ' + upstreamRes.statusCode);
     clientSocket.write(
       'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
         ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
@@ -154,6 +172,9 @@ server.on('upgrade', (req, clientSocket, head) => {
   });
 
   upstreamReq.on('response', (upstreamRes) => {
+    logLine(new Date().toISOString() + ' ' +
+      String(clientSocket.remoteAddress || '-').replace(/^::ffff:/, '') +
+      ' WS ' + req.url + ' -> ' + upstreamRes.statusCode + ' (no upgrade)');
     clientSocket.write(
       'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
         ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
