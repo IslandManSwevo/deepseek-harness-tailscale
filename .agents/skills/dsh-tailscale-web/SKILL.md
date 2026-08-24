@@ -47,6 +47,7 @@ Launcher essentials (already handled by the script):
 - Sets `$env:SSH_CONNECTION = 'remote'` before starting dsh so it mounts the web-safe in-browser directory picker (`host.listDirectory`/`host.createDirectory`) instead of the native OS dialog (loopback-only, 403s from remote devices).
 - Passes `--trusted-host` for the tailnet hostname and IP, both bare and with `:<proxy port>`.
 - Starts the proxy only if the proxy port is free; starts dsh only if the web port is free (idempotent).
+- If dsh is already running **without** `--trusted-host` (it came up loopback-only because Tailscale wasn't ready yet), the launcher restarts it with the trusted-host list — this is what prevents the phone from seeing a clean UI with no history.
 - Polls Tailscale for its identity at startup (`DSH_TS_WAIT_SECONDS`, default 60); if the tailnet is still connecting at logon it starts dsh on loopback and arms a background retry (`DSH_TS_RETRY_SECONDS`, default 600) that re-runs the launcher automatically once the identity appears, so the proxy comes up without a manual re-run.
 
 ### Configuration (environment variables)
@@ -97,6 +98,14 @@ node -e "const http=require('http');function t(path){const r=http.request({host:
 
 Expect `101` for both. A `400 Invalid Sec-WebSocket-Protocol header` means the proxy emits empty optional headers; `403` from a direct-to-dsh test means a Host/Origin trust mismatch.
 
+For a one-shot live health check (ownership + trusted hosts + a handshake with the tailnet `Origin`, the phone's exact path) run:
+
+```powershell
+start-harness.ps1 -Verify
+```
+
+It exits `0` only when both handshakes return `101` with `Origin: https://<ts-host>`; a non-zero exit means the phone will show a clean/no-history UI.
+
 ## Persistence notes
 
 Persistence is built in (not something to build): workspaces and sessions live under `~/.dsh\`. On refresh, the client restores the current session from `localStorage['dsh.sessions.current']`; if none is set (or the browser blocks storage, e.g. iOS private mode), it auto-connects the most recent workspace and creates/opens its blank session — history still exists server-side. If the UI appears empty after refresh, check the WebSockets first, then confirm `workspace.list` / `session.list` RPCs return data:
@@ -113,6 +122,8 @@ Persistence is built in (not something to build): workspaces and sessions live u
 ## Troubleshooting
 
 - Tailnet URL down after reboot but `127.0.0.1:3081` works → logon task raced Tailscale startup; the proxy was deferred. Wait for the background retry (`DSH_TS_RETRY_SECONDS`, default 600) or re-run `start-harness.ps1`; raise `DSH_TS_WAIT_SECONDS` if it recurs, or install the watchdog task (`watchdog.ps1`).
+- Phone shows a clean UI with no history while loopback works → dsh is running without its `--trusted-host` list (it started before Tailscale was ready, and the retry only brought up the proxy). Re-run `start-harness.ps1` (now self-heals this) and confirm with `start-harness.ps1 -Verify`. The dsh process command line should contain `--trusted-host <tsHost>`.
+- Proxy process died with `read ECONNRESET` in `proxy.err.log` → an unhandled socket error in the WebSocket tunnel (a phone dropping mid-stream). `web-proxy.js` now tears down the socket pair instead of crashing; deploy the latest copy and re-run the launcher.
 - Empty UI / "Add workspace" after refresh → WebSocket proxy bug (see above). Check browser console for `WebSocket connection to 'ws://.../api/events.mux' failed` and `connection lost, retry`.
 - `host.pickDirectory` HTTP 403 from phone → ensure `SSH_CONNECTION=remote` is set in the launcher and the bare trusted-host is present.
 - `host.openPath` HTTP 403 from phone → fixed by the `/__files` viewer; the proxy intercepts remote openPath calls (see Web file viewer above).
@@ -121,8 +132,9 @@ Persistence is built in (not something to build): workspaces and sessions live u
 
 ## Verification checklist
 
-1. Raw WebSocket handshakes through the proxy return `101` for `/api/events.mux` and `/api/events.host`.
-2. Page loads with all workspaces listed in the sidebar.
-3. Opening a conversation, then reloading the page, restores the same session with history intact.
-4. Workspace creation from a remote device works via the in-browser picker (no 403).
-5. From a non-loopback origin, clicking a produced file opens `/__files` viewer (no 403); the Files button is present; the viewer can list/read/edit/download within `DSH_FILES_ROOT`.
+1. `start-harness.ps1 -Verify` exits `0` (both WebSocket handshakes return `101` with the tailnet `Origin`).
+2. Raw WebSocket handshakes through the proxy return `101` for `/api/events.mux` and `/api/events.host`.
+3. Page loads with all workspaces listed in the sidebar.
+4. Opening a conversation, then reloading the page, restores the same session with history intact.
+5. Workspace creation from a remote device works via the in-browser picker (no 403).
+6. From a non-loopback origin, clicking a produced file opens `/__files` viewer (no 403); the Files button is present; the viewer can list/read/edit/download within `DSH_FILES_ROOT`.
