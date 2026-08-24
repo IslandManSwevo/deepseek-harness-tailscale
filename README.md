@@ -73,7 +73,7 @@ Every setting is optional and auto-detected; override with environment variables
 
 ## Testing
 
-`node --test test/` runs the proxy and file-viewer suites against an in-process fake upstream — no dsh or Tailscale needed:
+`node --test` runs the proxy and file-viewer suites against an in-process fake upstream — no dsh or Tailscale needed:
 
 - WebSocket `101` relay and upstream-rejection passthrough
 - `Host` → `Origin` normalization
