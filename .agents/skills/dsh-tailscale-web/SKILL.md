@@ -47,6 +47,7 @@ Launcher essentials (already handled by the script):
 - Sets `$env:SSH_CONNECTION = 'remote'` before starting dsh so it mounts the web-safe in-browser directory picker (`host.listDirectory`/`host.createDirectory`) instead of the native OS dialog (loopback-only, 403s from remote devices).
 - Passes `--trusted-host` for the tailnet hostname and IP, both bare and with `:<proxy port>`.
 - Starts the proxy only if the proxy port is free; starts dsh only if the web port is free (idempotent).
+- Polls Tailscale for its identity at startup (`DSH_TS_WAIT_SECONDS`, default 60); if the tailnet is still connecting at logon it starts dsh on loopback and arms a background retry (`DSH_TS_RETRY_SECONDS`, default 600) that re-runs the launcher automatically once the identity appears, so the proxy comes up without a manual re-run.
 
 ### Configuration (environment variables)
 
@@ -58,6 +59,8 @@ All optional; defaults are auto-detected, so a fresh clone runs as-is on a machi
 | `DSH_DSH_BIN` | `<npm global root>/@deepseek-ai/dsh/lib/bin.js` | dsh CLI entry |
 | `DSH_TS_HOST` | this node's name from `tailscale status` | Tailscale MagicDNS name |
 | `DSH_TS_IP` | this node's 100.x IP from `tailscale status` | Tailscale IP for `--trusted-host` |
+| `DSH_TS_WAIT_SECONDS` | `60` | seconds the launcher polls Tailscale for identity at startup |
+| `DSH_TS_RETRY_SECONDS` | `600` | seconds a background retry polls Tailscale so the proxy starts once the tailnet connects (`0` disables) |
 | `DSH_PROXY_PORT` | `3080` | tailnet-facing proxy port |
 | `DSH_WEB_PORT` | `3081` | loopback dsh web port |
 | `DSH_UPDATE_TRACK` | `next` | npm dist-tag checked for updates (`next` = newest; `latest` = stable) |
@@ -109,6 +112,7 @@ Persistence is built in (not something to build): workspaces and sessions live u
 
 ## Troubleshooting
 
+- Tailnet URL down after reboot but `127.0.0.1:3081` works → logon task raced Tailscale startup; the proxy was deferred. Wait for the background retry (`DSH_TS_RETRY_SECONDS`, default 600) or re-run `start-harness.ps1`; raise `DSH_TS_WAIT_SECONDS` if it recurs, or install the watchdog task (`watchdog.ps1`).
 - Empty UI / "Add workspace" after refresh → WebSocket proxy bug (see above). Check browser console for `WebSocket connection to 'ws://.../api/events.mux' failed` and `connection lost, retry`.
 - `host.pickDirectory` HTTP 403 from phone → ensure `SSH_CONNECTION=remote` is set in the launcher and the bare trusted-host is present.
 - `host.openPath` HTTP 403 from phone → fixed by the `/__files` viewer; the proxy intercepts remote openPath calls (see Web file viewer above).
