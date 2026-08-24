@@ -37,6 +37,7 @@
 #
 # Switches:
 #   -Status   - report proxy/dsh/firewall/serve state and exit
+#   -Verify   - health check (ownership + trusted hosts + WS handshake) and exit
 #   -Stop     - stop proxy and dsh (port ownership + PID files) and exit
 #   -Restart  - stop, then start both (default behavior when no switch given)
 #
@@ -45,7 +46,8 @@
 param(
     [switch]$Status,
     [switch]$Stop,
-    [switch]$Restart
+    [switch]$Restart,
+    [switch]$Verify
 )
 
 $ErrorActionPreference = 'Stop'
@@ -182,6 +184,43 @@ function Show-Status {
     if (Test-Path -LiteralPath $ulog) {
         Write-Output ("last update check   : " + (Get-Content -LiteralPath $ulog -Tail 1))
     }
+}
+
+function Show-Verify {
+    # Health check: assert both components are ours and that the proxy relays a
+    # WebSocket upgrade to dsh with the browser Origin (the phone's exact path).
+    # Exits non-zero when anything is wrong so the watchdog/operator can act.
+    # A missing trusted-host list on the running dsh is the root cause of the
+    # "clean, no history" symptom, so it is checked explicitly.
+    $ok = $true
+    Write-Output "proxy ($proxyPort)     : $(Component-State proxy)"
+    Write-Output "dsh web ($webPort)     : $(Component-State dsh)"
+    if (-not (Test-PortIsProxy $proxyPort)) { $ok = $false }
+    if (-not (Test-PortIsDsh $webPort))    { $ok = $false }
+
+    $dshOwner = Get-PortOwnerProcess $webPort
+    $hasTrusted = [bool]($dshOwner -and $dshOwner.CommandLine -match '--trusted-host')
+    if ($tsReady -and -not $hasTrusted) {
+        Write-Output 'trusted hosts          : MISSING on running dsh (tailnet requests will 403)'
+        $ok = $false
+    } else {
+        $th = if ($tsReady) { 'present' } else { 'n/a (tailnet identity not ready)' }
+        Write-Output "trusted hosts          : $th"
+    }
+
+    $origin = if ($tsReady) { "https://$tsHost" } else { "http://127.0.0.1:$proxyPort" }
+    $env:PROXY_PORT   = "$proxyPort"
+    $env:VERIFY_ORIGIN = $origin
+    $verifyJs = Join-Path $dir 'verify.js'
+    if (-not (Test-Path -LiteralPath $verifyJs)) { throw "verify.js not found: $verifyJs" }
+    & $node $verifyJs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "websocket handshake   : FAILED (origin $origin)"
+        $ok = $false
+    } else {
+        Write-Output "websocket handshake   : OK (origin $origin)"
+    }
+    if (-not $ok) { exit 1 }
 }
 
 function Rotate-Log([string]$path) {
@@ -389,6 +428,7 @@ if (-not $tsReady) {
 # Command-mode switches: status/stop/restart. Stop uses port ownership and PID
 # files; restart falls through to the normal start flow below.
 if ($Status)  { Show-Status; exit 0 }
+if ($Verify)  { Show-Verify; exit 0 }
 if ($Stop)    { Stop-Deployment; exit 0 }
 if ($Restart) { Stop-Deployment }
 
@@ -434,13 +474,42 @@ if ($tsReady) {
     Start-ProxyRetry
 }
 
-# Skip the dsh start if dsh is already up on the web port - but only when
-# the port is owned by dsh; a foreign listener means the harness is NOT running.
+# Build the trusted-host list from the Tailscale identity when available
+# (loopback-only fallback when it is not). IPv6 entries are bracketed. This
+# must be computed before the dsh-already-running check so a dsh that came up
+# loopback-only can be restarted with the tailnet hosts.
+$trustedHosts = @()
+if ($tsReady) {
+    foreach ($h in @("${tsIp}:${proxyPort}", $tsIp, "${tsHost}:${proxyPort}", $tsHost)) {
+        $trustedHosts += '--trusted-host'
+        $trustedHosts += $h
+    }
+    if ($tsIpV6) {
+        $trustedHosts += '--trusted-host'
+        $trustedHosts += "[${tsIpV6}]:${proxyPort}"
+        $trustedHosts += '--trusted-host'
+        $trustedHosts += "[${tsIpV6}]"
+    }
+}
+
+# Skip the dsh start if dsh is already up on the web port - but only when the
+# port is owned by dsh *and* it already carries the trusted-host list. A dsh
+# that came up loopback-only (Tailscale was not ready at the time) must be
+# restarted with the trusted hosts, otherwise the proxy forwards tailnet
+# requests that dsh rejects with 403 - the "clean, no history" symptom.
 if (Test-PortIsDsh $webPort) {
-    Write-Output "dsh web already running on port $webPort (owned by this deployment)"
     $owner = Get-PortOwnerProcess $webPort
-    if ($owner -and $owner.ProcessId) { Write-PidFile 'dsh' ([int]$owner.ProcessId) }
-    exit 0
+    $hasTrusted = [bool]($owner -and $owner.CommandLine -match '--trusted-host')
+    if ($tsReady -and -not $hasTrusted) {
+        Write-Output "dsh web is running without trusted hosts - restarting with Tailscale trusted hosts"
+        if ($owner -and $owner.ProcessId) { Stop-Process -Id $owner.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 800
+        Remove-PidFile 'dsh'
+    } else {
+        Write-Output "dsh web already running on port $webPort (owned by this deployment)"
+        if ($owner -and $owner.ProcessId) { Write-PidFile 'dsh' ([int]$owner.ProcessId) }
+        exit 0
+    }
 }
 if (Test-PortOpen $webPort) {
     Write-Warning "port $webPort is occupied by another process - dsh was NOT started."
@@ -460,22 +529,6 @@ Start-Process powershell -ArgumentList @(
 # dialog (host.pickDirectory), which is loopback-only and would 403 from the
 # phone. SSH_CONNECTION is the documented signal the picker resolver checks.
 $env:SSH_CONNECTION = 'remote'
-
-# Build the trusted-host list from the Tailscale identity when available
-# (loopback-only fallback when it is not). IPv6 entries are bracketed.
-$trustedHosts = @()
-if ($tsReady) {
-    foreach ($h in @("${tsIp}:${proxyPort}", $tsIp, "${tsHost}:${proxyPort}", $tsHost)) {
-        $trustedHosts += '--trusted-host'
-        $trustedHosts += $h
-    }
-    if ($tsIpV6) {
-        $trustedHosts += '--trusted-host'
-        $trustedHosts += "[${tsIpV6}]:${proxyPort}"
-        $trustedHosts += '--trusted-host'
-        $trustedHosts += "[${tsIpV6}]"
-    }
-}
 
 Rotate-Log $dlog
 Rotate-Log $derr

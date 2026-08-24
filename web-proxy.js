@@ -167,6 +167,19 @@ server.on('upgrade', (req, clientSocket, head) => {
         rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
     );
     if (upstreamHead && upstreamHead.length) clientSocket.write(upstreamHead);
+    // The raw sockets are piped directly and are no longer covered by the
+    // handshake-phase error handlers below. A phone dropping mid-stream (or
+    // dsh resetting the connection) surfaces as an ECONNRESET on one of these
+    // sockets; without handlers that 'error' is unhandled and crashes the
+    // whole proxy. Tear down the pair on either side's error/close.
+    const teardown = () => {
+      try { upstreamSocket.destroy(); } catch {}
+      try { clientSocket.destroy(); } catch {}
+    };
+    upstreamSocket.on('error', teardown);
+    clientSocket.on('error', teardown);
+    upstreamSocket.on('close', () => clientSocket.destroy());
+    clientSocket.on('close', () => upstreamSocket.destroy());
     upstreamSocket.pipe(clientSocket);
     clientSocket.pipe(upstreamSocket);
   });
@@ -180,6 +193,7 @@ server.on('upgrade', (req, clientSocket, head) => {
         ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
         rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
     );
+    upstreamRes.on('error', () => clientSocket.destroy());
     upstreamRes.pipe(clientSocket);
   });
 
@@ -188,6 +202,11 @@ server.on('upgrade', (req, clientSocket, head) => {
 
   if (head && head.length) upstreamReq.write(head);
   upstreamReq.end();
+});
+
+server.on('clientError', (err, socket) => {
+  // Malformed/aborted request - drop it instead of letting Node warn-and-hang.
+  try { socket.destroy(); } catch {}
 });
 
 server.listen(LISTEN_PORT, LISTEN_HOST, () => {

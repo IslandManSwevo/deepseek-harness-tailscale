@@ -179,6 +179,40 @@ test('relays upstream WebSocket rejection status', async () => {
   assert.strictEqual(result.status, 400);
 });
 
+test('survives abrupt WebSocket teardown without crashing', async () => {
+  // A phone dropping the connection mid-stream surfaces as ECONNRESET on one
+  // of the tunnel sockets; the proxy must tear down the pair, not crash.
+  for (let i = 0; i < 3; i++) {
+    await new Promise((resolve) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port: proxyPort,
+        path: '/api/events.mux',
+        headers: {
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Version': '13',
+          'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+          Origin: 'http://127.0.0.1:' + proxyPort,
+        },
+      });
+      req.on('upgrade', (_res, sock) => {
+        // resetAndDestroy sends RST (the ECONNRESET path that used to crash).
+        if (typeof sock.resetAndDestroy === 'function') sock.resetAndDestroy();
+        else sock.destroy();
+        resolve();
+      });
+      req.on('response', (res) => { res.resume(); resolve(); });
+      req.on('error', () => resolve());
+      req.end();
+    });
+  }
+  await new Promise((r) => setTimeout(r, 250));
+  assert.strictEqual(child.exitCode, null, 'proxy should still be running');
+  const body = await get('/html');
+  assert.match(body, /crypto\.randomUUID = function/);
+});
+
 // --- Header normalization ------------------------------------------------
 
 test('normalizes Host to the browser Origin', async () => {

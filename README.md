@@ -67,7 +67,8 @@ Every setting is optional and auto-detected; override with environment variables
 
 ## Troubleshooting at a glance
 
-- **History "missing" after a refresh** → WebSocket proxying; run the raw-handshake test from the [guide](docs/DEPLOY.md#troubleshooting).
+- **History "missing" after a refresh** → WebSocket proxying; run `start-harness.ps1 -Verify` (a one-shot health check) or the raw-handshake test from the [guide](docs/DEPLOY.md#troubleshooting).
+- **Clean UI with no history on your phone, but fine on the PC** → dsh is running without its `--trusted-host` list (it started before Tailscale was ready). Re-run `start-harness.ps1` (it now self-heals this) and confirm with `-Verify`.
 - **`HTTP 403` creating a workspace from your phone** → the launcher sets `SSH_CONNECTION=remote` to enable the in-browser directory picker.
 - **`HTTP 403` opening a produced file from your phone** → use the built-in `/__files` viewer.
 
@@ -76,9 +77,12 @@ Every setting is optional and auto-detected; override with environment variables
 `node --test` runs the proxy and file-viewer suites against an in-process fake upstream — no dsh or Tailscale needed:
 
 - WebSocket `101` relay and upstream-rejection passthrough
+- abrupt-disconnect resilience (the proxy must survive a phone dropping mid-stream, not crash)
 - `Host` → `Origin` normalization
 - polyfill + integration-script injection (including when the document already references `crypto.randomUUID`)
 - `/__files` path containment, trust fence, and CRLF-preserving writes
+
+For a live-deployment health check, run `start-harness.ps1 -Verify`: it asserts component ownership, that dsh carries its `--trusted-host` list, and that both WebSocket handshakes return `101` with the tailnet `Origin` (the phone's exact request path).
 
 ## FAQ
 
