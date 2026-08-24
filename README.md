@@ -24,7 +24,7 @@ This project fixes all three, for real.
 
 | Component | What it does |
 |---|---|
-| **`start-harness.ps1`** | One command. Auto-detects Node.js, your `dsh` install, and your Tailscale identity, then starts the proxy (if the port is free) and dsh (if the port is free). Idempotent — no config files to edit. |
+| **`start-harness.ps1`** | One command. Auto-detects Node.js, your `dsh` install, and your Tailscale identity, then starts the proxy (if the port is free) and dsh (if the port is free). Idempotent — no config files to edit. If the tailnet is still connecting at logon it keeps polling in the background and starts the proxy automatically once Tailscale is ready. |
 | **`web-proxy.js`** | Hardened Node reverse proxy: relays **WebSocket** upgrades (`/api/events.mux`, `/api/events.host`) faithfully so a refresh restores your history; normalizes `Host`/`Origin` so dsh's browser-trust fence passes; injects the `crypto.randomUUID` polyfill needed over plain HTTP. |
 | **`web-files.js` + `web-files-page.html`** | Built-in file browser/viewer/editor at `/__files` — click a produced file from your phone and it opens instead of 403-ing. |
 | **`check-updates.ps1`** | Notifies (or auto-updates, with a `~/.dsh` backup) when a newer `dsh` is available. |
@@ -63,7 +63,7 @@ Refresh → history-lost is **not a data problem — your data was never lost** 
 
 ## Configuration
 
-Every setting is optional and auto-detected; override with environment variables (`DSH_NODE`, `DSH_DSH_BIN`, `DSH_TS_HOST`, `DSH_TS_IP`, `DSH_PROXY_PORT`, `DSH_WEB_PORT`, `DSH_UPDATE_TRACK`, `DSH_AUTO_UPDATE`, `DSH_FILES_ROOT`). Details in the [deployment guide](docs/DEPLOY.md#configuration).
+Every setting is optional and auto-detected; override with environment variables (`DSH_NODE`, `DSH_DSH_BIN`, `DSH_TS_HOST`, `DSH_TS_IP`, `DSH_TS_WAIT_SECONDS`, `DSH_TS_RETRY_SECONDS`, `DSH_PROXY_PORT`, `DSH_WEB_PORT`, `DSH_UPDATE_TRACK`, `DSH_AUTO_UPDATE`, `DSH_FILES_ROOT`). If Tailscale is still connecting at logon, the launcher polls for it (`DSH_TS_WAIT_SECONDS`, default 60) and then arms a background retry (`DSH_TS_RETRY_SECONDS`, default 600) so the proxy starts automatically once the tailnet appears. Details in the [deployment guide](docs/DEPLOY.md#configuration).
 
 ## Troubleshooting at a glance
 

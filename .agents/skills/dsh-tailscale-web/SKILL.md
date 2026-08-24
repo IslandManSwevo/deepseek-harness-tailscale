@@ -47,6 +47,7 @@ Launcher essentials (already handled by the script):
 - Sets `$env:SSH_CONNECTION = 'remote'` before starting dsh so it mounts the web-safe in-browser directory picker (`host.listDirectory`/`host.createDirectory`) instead of the native OS dialog (loopback-only, 403s from remote devices).
 - Passes `--trusted-host` for the tailnet hostname and IP, both bare and with `:<proxy port>`.
 - Starts the proxy only if the proxy port is free; starts dsh only if the web port is free (idempotent).
+- Polls Tailscale for its identity at startup (`DSH_TS_WAIT_SECONDS`, default 60); if the tailnet is still connecting at logon it starts dsh on loopback and arms a background retry (`DSH_TS_RETRY_SECONDS`, default 600) that re-runs the launcher automatically once the identity appears, so the proxy comes up without a manual re-run.
 
 ### Configuration (environment variables)
 
@@ -58,6 +59,8 @@ All optional; defaults are auto-detected, so a fresh clone runs as-is on a machi
 | `DSH_DSH_BIN` | `<npm global root>/@deepseek-ai/dsh/lib/bin.js` | dsh CLI entry |
 | `DSH_TS_HOST` | this node's name from `tailscale status` | Tailscale MagicDNS name |
 | `DSH_TS_IP` | this node's 100.x IP from `tailscale status` | Tailscale IP for `--trusted-host` |
+| `DSH_TS_WAIT_SECONDS` | `60` | seconds the launcher polls Tailscale for identity at startup |
+| `DSH_TS_RETRY_SECONDS` | `600` | seconds a background retry polls Tailscale so the proxy starts once the tailnet connects (`0` disables) |
 | `DSH_PROXY_PORT` | `3080` | tailnet-facing proxy port |
 | `DSH_WEB_PORT` | `3081` | loopback dsh web port |
 | `DSH_UPDATE_TRACK` | `next` | npm dist-tag checked for updates (`next` = newest; `latest` = stable) |
@@ -78,54 +81,15 @@ The client opens these with plain `new WebSocket(url)` (no subprotocol) in `dsh-
 
 ### Correct upgrade handler pattern
 
-A naive `net.connect`-based tunnel that always writes `Sec-WebSocket-Protocol:` / `Sec-WebSocket-Extensions:` (even when empty) and drops `Origin`/`Host` normalization breaks the handshake. Use `http.request` so Node relays the upstream `101` faithfully, preserve all original headers, only forward optional `Sec-WebSocket-*` headers when present, and normalize `Host` to the browser Origin authority:
+A naive `net.connect`-based tunnel that always writes `Sec-WebSocket-Protocol:` / `Sec-WebSocket-Extensions:` (even when empty) and drops `Origin`/`Host` normalization breaks the handshake. The exact handler lives in `web-proxy.js` and is asserted by the repo's automated suite (`node --test test/proxy.test.js`) — keep the two in sync. The pattern that must be preserved:
 
-```js
-function rawHeaderLines(rawHeaders) {
-  let out = '';
-  for (let i = 0; i < rawHeaders.length; i += 2) {
-    out += rawHeaders[i] + ': ' + rawHeaders[i + 1] + '\r\n';
-  }
-  return out;
-}
-
-server.on('upgrade', (req, clientSocket, head) => {
-  const headers = Object.assign({}, req.headers);
-  delete headers['proxy-connection'];
-  const origin = headers['origin'];
-  if (typeof origin === 'string' && origin !== '') {
-    try { headers['host'] = new URL(origin).host; } catch {}
-  }
-  const upstreamReq = http.request({
-    host: UPSTREAM_HOST, port: UPSTREAM_PORT,
-    method: req.method, path: req.url, headers,
-  });
-  upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
-    clientSocket.write(
-      'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
-        ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
-        rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
-    );
-    if (upstreamHead && upstreamHead.length) clientSocket.write(upstreamHead);
-    upstreamSocket.pipe(clientSocket);
-    clientSocket.pipe(upstreamSocket);
-  });
-  upstreamReq.on('response', (upstreamRes) => {
-    clientSocket.write(
-      'HTTP/' + upstreamRes.httpVersion + ' ' + upstreamRes.statusCode +
-        ' ' + (upstreamRes.statusMessage || '') + '\r\n' +
-        rawHeaderLines(upstreamRes.rawHeaders) + '\r\n'
-    );
-    upstreamRes.pipe(clientSocket);
-  });
-  upstreamReq.on('error', () => clientSocket.destroy());
-  clientSocket.on('error', () => upstreamReq.destroy());
-  if (head && head.length) upstreamReq.write(head);
-  upstreamReq.end();
-});
-```
+- Use `http.request` to the upstream so Node relays the upstream `101` (or error) response faithfully.
+- Preserve all original headers (`Origin`, `Cookie`); only forward optional `Sec-WebSocket-*` headers when present (an empty `Sec-WebSocket-Protocol:` makes dsh reject with `400`).
+- Normalize `Host` to the browser Origin authority, same as the HTTP path.
 
 ### Quick handshake test
+
+The same two handshakes are asserted automatically by `node --test test/proxy.test.js`; for a manual check against a live deployment:
 
 ```js
 node -e "const http=require('http');function t(path){const r=http.request({host:'127.0.0.1',port:3080,path,headers:{'Connection':'Upgrade','Upgrade':'websocket','Sec-WebSocket-Version':'13','Sec-WebSocket-Key':'dGhlIHNhbXBsZSBub25jZQ==','Origin':'http://127.0.0.1:3080'}});r.on('upgrade',(res,sock)=>{console.log(path,'->',res.statusCode);sock.destroy();});r.on('response',res=>{console.log(path,'->',res.statusCode);res.resume();});r.on('error',e=>console.log(path,'ERR',e.message));r.end();}t('/api/events.mux');setTimeout(()=>t('/api/events.host'),600);"
@@ -148,6 +112,7 @@ Persistence is built in (not something to build): workspaces and sessions live u
 
 ## Troubleshooting
 
+- Tailnet URL down after reboot but `127.0.0.1:3081` works → logon task raced Tailscale startup; the proxy was deferred. Wait for the background retry (`DSH_TS_RETRY_SECONDS`, default 600) or re-run `start-harness.ps1`; raise `DSH_TS_WAIT_SECONDS` if it recurs, or install the watchdog task (`watchdog.ps1`).
 - Empty UI / "Add workspace" after refresh → WebSocket proxy bug (see above). Check browser console for `WebSocket connection to 'ws://.../api/events.mux' failed` and `connection lost, retry`.
 - `host.pickDirectory` HTTP 403 from phone → ensure `SSH_CONNECTION=remote` is set in the launcher and the bare trusted-host is present.
 - `host.openPath` HTTP 403 from phone → fixed by the `/__files` viewer; the proxy intercepts remote openPath calls (see Web file viewer above).

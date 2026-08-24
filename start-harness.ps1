@@ -19,6 +19,9 @@
 #   DSH_TS_IP      - Tailscale 100.x IP (default: from `tailscale status`)
 #   DSH_TS_WAIT_SECONDS - seconds to poll Tailscale for its identity at startup
 #                    (default: 60; accounts for Tailscale still starting at logon)
+#   DSH_TS_RETRY_SECONDS - seconds a background retry keeps polling Tailscale
+#                    for its identity so the proxy can start once the tailnet
+#                    finishes connecting (default: 600; 0 disables the retry)
 #   DSH_PROXY_PORT - tailnet-facing proxy port (default 3080)
 #   DSH_WEB_PORT   - loopback dsh web port (default 3081)
 #   DSH_UPDATE_TRACK - npm dist-tag for update checks: "next" (default) or
@@ -233,6 +236,47 @@ function Ensure-FirewallRule([int] $port, [string] $name) {
     }
 }
 
+# --- Tailscale retry (background) --------------------------------------
+# If Tailscale identity is not ready at startup, the proxy is deferred (dsh
+# still starts on loopback). A detached background process then polls for the
+# identity and re-invokes this launcher (idempotent) the moment it appears, so
+# the proxy comes up automatically once the tailnet finishes connecting. The
+# retry is bounded by DSH_TS_RETRY_SECONDS (default 600; 0 disables it).
+function Start-ProxyRetry {
+    $retrySeconds = 600
+    if ($env:DSH_TS_RETRY_SECONDS -match '^\d+$') { $retrySeconds = [int]$env:DSH_TS_RETRY_SECONDS }
+    if ($retrySeconds -le 0) { return }
+
+    # Single-quoted here-string: this process does not interpolate it; the
+    # detached child evaluates it via -EncodedCommand. The launcher path and
+    # retry window are passed through the environment to avoid quoting issues.
+    $retry = @'
+$deadline = (Get-Date).AddSeconds([int]$env:DSH_TS_RETRY_SECONDS)
+while ((Get-Date) -lt $deadline) {
+    try {
+        $ts = tailscale status --json 2>$null | ConvertFrom-Json
+        if ($ts.Self.DNSName -and (@($ts.Self.TailscaleIPs | Where-Object { $_ -like '100.*' })).Count -gt 0) {
+            & $env:DSH_RETRY_LAUNCHER
+            exit 0
+        }
+    } catch { }
+    Start-Sleep -Seconds 5
+}
+Write-Warning "Tailscale identity still unavailable after $([int]$env:DSH_TS_RETRY_SECONDS)s - proxy not started."
+'@
+
+    $env:DSH_TS_RETRY_SECONDS = "$retrySeconds"
+    $env:DSH_RETRY_LAUNCHER   = Join-Path $dir 'start-harness.ps1'
+
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($retry))
+    Start-Process powershell -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+        '-EncodedCommand', $encoded
+    ) -WindowStyle Hidden | Out-Null
+
+    Write-Output "tailscale retry armed (re-polling up to $retrySeconds seconds for the proxy)"
+}
+
 # Locate a Node.js >= 24 runtime. dsh rc.8 reaches into Node's internal ESM
 # loader and needs the Node 24 API, but PATH often resolves `node` to an older
 # system Node (e.g. C:\Program Files\nodejs, v22) ahead of scoop's Node 24.
@@ -386,7 +430,8 @@ if ($tsReady) {
         Write-Output "web proxy started on port $proxyPort -> 127.0.0.1:$webPort"
     }
 } else {
-    Write-Warning 'skipping web proxy (Tailscale identity unavailable)'
+    Write-Warning 'Tailscale identity unavailable - deferring web proxy and retrying in the background.'
+    Start-ProxyRetry
 }
 
 # Skip the dsh start if dsh is already up on the web port - but only when

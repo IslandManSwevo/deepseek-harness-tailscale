@@ -85,6 +85,8 @@ Everything is optional — the launcher auto-detects the common values and every
 | `DSH_DSH_BIN` | `<npm global root>/@deepseek-ai/dsh/lib/bin.js` | dsh CLI entry |
 | `DSH_TS_HOST` | this node's name from `tailscale status` | Tailscale MagicDNS name, e.g. `myhost.tailXXXX.ts.net` |
 | `DSH_TS_IP` | this node's 100.x IP from `tailscale status` | Tailscale IP used for `--trusted-host` |
+| `DSH_TS_WAIT_SECONDS` | `60` | seconds the launcher polls Tailscale for its identity at startup (Tailscale is often still starting at logon) |
+| `DSH_TS_RETRY_SECONDS` | `600` | seconds a background retry keeps polling Tailscale after startup so the proxy starts automatically once the tailnet connects (`0` disables the retry) |
 | `DSH_PROXY_PORT` | `3080` | tailnet-facing proxy port |
 | `DSH_WEB_PORT` | `3081` | loopback dsh web port |
 | `DSH_UPDATE_TRACK` | `next` | npm dist-tag checked for updates (`next` = newest; `latest` = stable) |
@@ -100,11 +102,11 @@ Start (idempotent — exits if already running):
 powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dsh\start-harness.ps1"
 ```
 
-Stop:
+Stop (ownership-aware — stops only this deployment's processes; a foreign process squatting on the ports is reported and left running):
 ```powershell
-Get-Process node | Where-Object { $_.Path -like '*scoop*nodejs-lts*' } | Stop-Process
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\dsh\start-harness.ps1" -Stop
 ```
-(or find the PID listening on 3081 and stop it.)
+(`-Restart` stops then starts again; plain runs are idempotent.)
 
 The launcher starts `web-proxy.js` (if the proxy port is free) and then dsh (if the web port is free). It exports `SSH_CONNECTION=remote` to mount the web-safe directory picker, then runs dsh with `--trusted-host` entries derived from the Tailscale identity and proxy port (both `host:port` and bare `host` spellings).
 
@@ -116,6 +118,8 @@ A scheduled task named `DeepSeek Harness` starts the harness at user logon:
 - Unlimited execution time limit; restarts up to 3 times, 1 minute apart.
 
 Note: this is a logon task, not a boot task — the harness starts when you sign in. To make it start before login you'd need a SYSTEM-level boot task (Tailscale Serve and the Node proxy would also need to be started, or made system-wide).
+
+**Tailscale race at logon:** the launcher polls Tailscale for its identity for `DSH_TS_WAIT_SECONDS` (default 60) and, if the tailnet still hasn't connected, starts dsh on loopback and arms a background retry (`DSH_TS_RETRY_SECONDS`, default 600) that re-runs the launcher the moment the identity appears — so the proxy comes up automatically a short while after sign-in even when the logon task fired before Tailscale finished connecting.
 
 ## Networking details
 
@@ -144,6 +148,7 @@ Security model (same spirit as dsh's own browser-trust fence):
 
 ## Troubleshooting
 
+- **Tailnet URL down after reboot, but `http://127.0.0.1:3081` works**: the logon task started dsh before Tailscale reconnected, so the proxy (3080) was deferred. Wait for the background retry (`DSH_TS_RETRY_SECONDS`, default 600) to pick it up, or re-run `start-harness.ps1` once now that Tailscale is connected. If it recurs, raise `DSH_TS_WAIT_SECONDS` or `DSH_TS_RETRY_SECONDS`, or install the watchdog task (`watchdog.ps1`).
 - **`http://<tailscale-ip>:3080` fails from a phone**:
   1. Confirm Tailscale VPN is ON in the mobile app and the device is connected (`tailscale status` on the PC should show the device as active).
   2. Confirm the harness is up: `http://127.0.0.1:3081` on the PC.
@@ -161,6 +166,7 @@ Security model (same spirit as dsh's own browser-trust fence):
 
 ## Change log
 
+- **2026-08-24 — Tailscale startup retry**: `start-harness.ps1` now polls Tailscale for its identity (`DSH_TS_WAIT_SECONDS`, default 60) and, when the tailnet is still connecting at logon, arms a background retry (`DSH_TS_RETRY_SECONDS`, default 600) that starts the proxy automatically once the identity appears — fixing the case where a reboot left the tailnet URL down until a manual re-run. See [Auto-start on boot](#auto-start-on-boot).
 - **2026-08-20 — Web file viewer/editor for remote devices**: added `web-files.js` + `web-files-page.html`, served by the proxy at `/__files`. Remote `host.openPath` (loopback-only in dsh, 403s from the phone) is intercepted so file chips open the viewer instead; a floating **Files** button links to it. Browse, view, edit (Save), and download within `DSH_FILES_ROOT` (default `~`), behind the same loopback/trusted-host fence as dsh. See [Web file viewer](#web-file-viewer).
 - **2026-08-19 — Startup update checks**: added `check-updates.ps1` (run by `start-harness.ps1` at logon) to compare the installed dsh version against the npm registry and log/notify — or auto-update via `DSH_AUTO_UPDATE=1` with an automatic `~/.dsh` backup. See [Configuration](#configuration).
 - **2026-08-19 — WebSocket proxy fix (persistence looked broken on refresh)**: rewrote the `upgrade` handler in `web-proxy.js` to proxy WebSockets with `http.request` instead of a raw `net.connect` tunnel. This preserves `Origin`/`Cookie`/`Sec-WebSocket-*` headers (no more empty optional headers → no more `400 Invalid Sec-WebSocket-Protocol header`), applies the same `Host`→origin normalization as the HTTP path, and relays the upstream `101`/error response faithfully. Without it, the client's `/api/events.mux` and `/api/events.host` WebSockets failed and the UI never loaded workspaces or history. See the troubleshooting entry above.
