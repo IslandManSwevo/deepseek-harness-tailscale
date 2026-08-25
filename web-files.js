@@ -385,7 +385,15 @@ function integrationScript() {
     var realFetch = window.fetch;
     window.fetch = function (input, init) {
       try {
-        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        // input may be a string, a URL object, or a Request. A URL object has
+        // no url property — the full string lives on href. Reading url first
+        // (for a Request) then href (for a URL) then the raw string covers
+        // every case. Before this fix, a URL object resolved to nothing, so
+        // the host.openPath match never fired and the real fetch hit dsh's
+        // loopback fence -> 403 from the phone.
+        var url = (typeof input === 'string')
+          ? input
+          : ((input && (input.url || input.href)) || '');
         var method = (init && init.method) || (input && input.method) || 'GET';
         if (method === 'POST' && url.indexOf('/api/host.openPath') !== -1) {
           var body = init && init.body ? String(init.body) : '';

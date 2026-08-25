@@ -11,6 +11,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert');
 const http = require('node:http');
 const net = require('node:net');
+const vm = require('node:vm');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const os = require('node:os');
@@ -271,4 +272,64 @@ test('/__files serves the viewer and rejects traversal', async () => {
       .on('error', reject);
   });
   assert.strictEqual(res, 403);
+});
+
+test('interceptor catches host.openPath even when called with a URL object', async () => {
+  // Regression: dsh calls fetch(fetch(new URL('/api/host.openPath', base), ...)).
+  // A URL object has no `.url` — only `.href`. The interceptor previously read
+  // `input.url`, got `undefined`, never matched, and the real fetch hit dsh's
+  // loopback fence -> 403 from the phone. Reproduce that exact call shape here
+  // and assert the interceptor intercepts (returns the synthetic ok), not the
+  // real fetch.
+  const body = await get('/html');
+  const m = body.match(/<script>\s*\(function \(\) \{\s*function isLoopbackHost[\s\S]*?<\/script>/);
+  assert.ok(m, 'integration script should be injected into HTML');
+  const script = m[0].replace(/<\/?script>/g, '');
+
+  const calls = { realFetch: 0, openViewer: 0, opened: null };
+  const openedTab = { location: { assign: () => { calls.openViewer++; } } };
+  const sandbox = {
+    window: {
+      open: () => { calls.openViewer++; return openedTab; },
+    },
+    location: { hostname: '100.85.211.6', assign: () => { calls.openViewer++; } },
+    document: {
+      readyState: 'complete',
+      addEventListener: () => {},
+      createElement: () => ({ setAttribute: () => {}, addEventListener: () => {}, style: {} }),
+      body: { appendChild: () => {} },
+      documentElement: { appendChild: () => {} },
+    },
+    // Real global fetch that would hit dsh — must NOT be reached for openPath.
+    fetch: () => { calls.realFetch++; return Promise.resolve({ ok: false, status: 403 }); },
+    Response: function (bodyArg, init) {
+      this._body = typeof bodyArg === 'string' ? bodyArg : JSON.stringify(bodyArg);
+      this.ok = (init && init.status === 200) ? true : false;
+      this.status = (init && init.status) || 200;
+      this.json = () => Promise.resolve(JSON.parse(this._body));
+    },
+    Promise,
+    JSON,
+    encodeURIComponent,
+  };
+  sandbox.globalThis = sandbox;
+  sandbox.window.fetch = sandbox.fetch;
+  vm.runInNewContext(script, sandbox);
+
+  const interceptFetch = sandbox.window.fetch;
+  const urlObj = new URL('http://100.85.211.6:3080/api/host.openPath');
+  const payload = JSON.stringify({ type: 'client-request', rpcId: 'rpc-1', method: 'host.openPath', payload: { path: 'C:\\foo.md' } });
+  const res = await interceptFetch(urlObj, { method: 'POST', body: payload, headers: { 'content-type': 'application/json' } });
+
+  // The response is the synthetic success, and the real fetch was never reached.
+  assert.strictEqual(calls.realFetch, 0, 'openPath must be intercepted, not sent to dsh');
+  assert.ok(calls.openViewer >= 1, 'viewer should be opened for a produced file');
+  assert.strictEqual(res.status, 200);
+  const parsed = await res.json();
+  assert.strictEqual(parsed.result.value.opened, true);
+
+  // And the opposite: a non-openPath URL must still fall through to real fetch.
+  calls.realFetch = 0;
+  await interceptFetch(new URL('http://100.85.211.6:3080/api/workspace.list'), { method: 'POST', body: '{}' });
+  assert.strictEqual(calls.realFetch, 1, 'non-openPath calls must reach the real fetch');
 });
